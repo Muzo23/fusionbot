@@ -128,3 +128,23 @@ Live run 2 dodaje G±1, jer je realni poremećaj nakon okreta ≈ 0.6°. Kriteri
 
 Mogući pokus kasnije: iste kompenzacije u sporom završetku okreta, gdje nastaje ostatak od ≈ 0.6°
 (korak 7).
+
+### Live run 2 (5. 10. 2026, s kompenzacijom) – PASS
+
+| run | na FULL→HOLD: y / α | na ROOT-u: y / α |
+|---|---:|---:|
+| G0 | −0.02 mm / −0.001° | −0.00 mm / −0.001° |
+| G+5 | +2.68 mm / −0.411° | −1.77 mm / −0.127° |
+| G−5 | −2.87 mm / +0.380° | +1.54 mm / +0.145° |
+| G+1 | +2.04 mm / −0.155° | −0.90 mm / −0.186° |
+| G−1 | −1.99 mm / +0.122° | +0.59 mm / +0.165° |
+| O+5 (bez vođenja) | +36.1 mm / +4.56° | +113.1 mm / +4.56° |
+
+- **Učinak vođenja:** lateralna pogreška nakon poremećaja od 5° je 1.8 mm, a bez vođenja 113 mm
+  (64× manje).
+- **Usporedba s runom 1:** u odnosu na run 1 bez kompenzacije (12 mm / 0.6°) pogreška je manja 7×,
+  a kut 4×.
+- **Titranja nema:** jedna promjena predznaka ω po pokretanju. G0 ima šum amplitude 0.003 rad/s.
+- **Kolizija nema** ni u jednom pokretanju.
+- **Offline model:** live rezultati su bolji od offline očekivanja (≈ 3 mm / 0.34°), dakle model
+  rotacijskog trenja je konzervativan.

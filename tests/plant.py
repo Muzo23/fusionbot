@@ -37,11 +37,21 @@ class DrivePlant:
         self.pl, self.pr = WheelPI(), WheelPI()
         self.odo = DifferentialDriveOdometry(x, y, th)
         self.ul = self.ur = 0.0
+        self.last = None
 
     def step(self, v_ref, w_ref, u_diff_ff=0.0):
         """One 10 ms control tick. Returns the odometry increment.
         u_diff_ff: differential feed-forward added to the motor commands
-        (right +, left -), applied from the next tick like the PI output."""
+        (right +, left -), applied from the next tick like the PI output.
+        NOTE: refs passed here are used by the PI AFTER this tick's measurement;
+        for exact live ordering use advance() -> controller -> control()."""
+        inc = self.advance()
+        self.control(v_ref, w_ref, u_diff_ff)
+        return inc
+
+    def advance(self):
+        """Simulate 10 ms with the held motor commands, read encoders, update
+        odometry. Returns the odometry increment (encoder samples in self.last)."""
         h = rc.DYNAMICS_TIMESTEP_S
         for _ in range(5):
             tl = self.ml.update(self.ul, self.wl, h)
@@ -69,12 +79,15 @@ class DrivePlant:
             self.th += w * h
         sl = self.el.update(wrap_to_pi(self.ql), rc.SIMULATION_TIMESTEP_S)
         sr = self.er.update(wrap_to_pi(self.qr), rc.SIMULATION_TIMESTEP_S)
-        inc = self.odo.update(sl.delta_counts, sr.delta_counts)
+        self.last = (sl, sr)
+        return self.odo.update(sl.delta_counts, sr.delta_counts)
+
+    def control(self, v_ref, w_ref, u_diff_ff=0.0):
+        """Wheel PIs on the latest encoder samples -> motor commands held for the next tick."""
+        sl, sr = self.last
         wl_ref, wr_ref = rc.wheel_speeds_from_body(v_ref, w_ref)
         self.ul = max(-1.0, min(1.0, self.pl.update(wl_ref, sl.speed_rad_s).command - u_diff_ff))
         self.ur = max(-1.0, min(1.0, self.pr.update(wr_ref, sr.speed_rad_s).command + u_diff_ff))
-        self.last = (sl, sr)
-        return inc
 
     def reset_pi(self):
         self.pl.reset()
