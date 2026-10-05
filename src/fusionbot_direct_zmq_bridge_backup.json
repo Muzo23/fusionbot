@@ -1,0 +1,9 @@
+{
+  "left_joint_mode": 5,
+  "right_joint_mode": 5,
+  "left_dyn_ctrl_mode": 16,
+  "right_dyn_ctrl_mode": 16,
+  "simulation_dt_s": 0.01,
+  "dynamics_dt_s": 0.002,
+  "steps_per_rendering": 3
+}
