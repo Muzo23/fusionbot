@@ -147,7 +147,9 @@ def run_mission(turns, csv_name, alpha=None, primitives=None, speed=V, hook=None
     """One simulation run: START -> ROOT -> turns. Returns (results, rows).
 
     hook(mission, state, inc, v, w) -> (w_override | None, extra_columns: dict)
-    is called every tick after the mission (used by step 8 for the guidance)."""
+    is called every tick after the mission (used by step 8 for the guidance).
+    If extra_columns contains "u_ff", it is added to the right motor command
+    and subtracted from the left one (yaw friction feed-forward)."""
     sim = RemoteAPIClient().require("sim")
     original_rt = prepare_lockstep(sim)
     stack, mission = Stack(), Mission(turns, alpha, primitives, speed)
@@ -182,8 +184,9 @@ def run_mission(turns, csv_name, alpha=None, primitives=None, speed=V, hook=None
                 if w_over is not None:
                     w = w_over
             wl, wr = rc.wheel_speeds_from_body(v, w)
-            cl = stack.pl.update(wl, sl.speed_rad_s).command
-            cr = stack.pr.update(wr, sr.speed_rad_s).command
+            u_ff = float(extra.get("u_ff") or 0.0)
+            cl = max(-1.0, min(1.0, stack.pl.update(wl, sl.speed_rad_s).command - u_ff))
+            cr = max(-1.0, min(1.0, stack.pr.update(wr, sr.speed_rad_s).command + u_ff))
             link.send(s.state_sequence, cl, cr)
             rows.append({
                 "t": t, "phase": f"{mission.phase}:{mission.label}", "v_ref": v, "w_ref": w,

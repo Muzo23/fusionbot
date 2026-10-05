@@ -1,11 +1,17 @@
 """
 Step 8c LIVE check: corridor guidance v2 in the T1 START corridor.
 
-Four simulation runs, each from START (scene restarts):
+Six simulation runs, each from START (scene restarts):
     G0    no disturbance, guidance ON
     G+5   in-place +5 deg disturbance at START, guidance ON
     G-5   in-place -5 deg disturbance at START, guidance ON
+    G+1   +1 deg (realistic: one turn residual is ~0.6 deg), guidance ON
+    G-1   -1 deg, guidance ON
     O+5   +5 deg disturbance, guidance OFF (open-loop reference)
+Guidance runs use the yaw-friction feed-forward (core/yaw_friction.py).
+
+Live run 1 (without feed-forward) failed: G+-5 ended at |y| 12 mm, |alpha| 0.6 deg
+because the robot barely follows small omega (castor/scrub stiction).
 After the disturbance the robot drives straight at 0.25 m/s until the ODOMETRY
 distance reaches the ROOT centre (1.422634 m) and stops. The disturbance turn is
 NOT reported to the guidance (no on_turn_started), so it must correct it.
@@ -16,8 +22,9 @@ diagonals look into the ROOT opening -> HOLD on the learnt axis).
 GT only for the report: y (lateral, left +) and alpha w.r.t. the START corridor
 axis, at the FULL->HOLD switch and at the stop.
 
-Offline expectation (step-8a mounts): G+-5 -> |y| ~ 1.5 mm, |alpha| ~ 0 deg at
-ROOT; O+5 -> y ~ 117 mm, alpha ~ 4.7 deg.
+Offline expectation (plant with the fitted yaw friction, feed-forward ON):
+G+-5 -> |y| ~ 3 mm, |alpha| ~ 0.4 deg; G+-1 -> |y| ~ 4 mm, |alpha| < 0.1 deg;
+O+5 -> y ~ 117 mm, alpha ~ 4.7 deg.
 
     python -m checks.step08c_live_guidance     (from src/, scene T1, robot at START)
 """
@@ -27,14 +34,17 @@ from __future__ import annotations
 import math
 
 from checks.step07_live_turns import RESULTS as _R7, START_TO_ROOT_M, run_mission
+from core.yaw_friction import yaw_friction_feedforward
 from navigation.corridor_guidance import CorridorGuidance
 
 RESULTS = _R7.parent / "step08"
-RUNS = (("G0", 0.0, True), ("G+5", 5.0, True), ("G-5", -5.0, True), ("O+5", 5.0, False))
+RUNS = (("G0", 0.0, True), ("G+5", 5.0, True), ("G-5", -5.0, True),
+        ("G+1", 1.0, True), ("G-1", -1.0, True), ("O+5", 5.0, False))
 
 # acceptance at the ROOT stop (GT)
 TOL_Y0_MM, TOL_A0_DEG = 3.0, 0.3          # undisturbed
 TOL_Y5_MM, TOL_A5_DEG = 10.0, 0.5         # after a 5 deg disturbance
+TOL_Y1_MM, TOL_A1_DEG = 5.0, 0.3          # after a 1 deg disturbance
 
 
 def make_hook(guided: bool):
@@ -44,13 +54,15 @@ def make_hook(guided: bool):
         g.update_odometry(inc.dtheta_rad)
         out = g.command(state.proximity)
         straight = mission.phase == "move" and mission.label == "straight"
+        active = guided and straight
         extra = {
+            "u_ff": yaw_friction_feedforward(out.omega_ref_rad_s) if active else 0.0,
             "g_mode": out.mode,
             "g_y_hat": out.y_hat_m, "g_alpha_hat": out.alpha_hat_rad,
             "g_omega": out.omega_ref_rad_s,
             "g_axis": g.axis, "g_theta_rel": g.theta_rel,
         }
-        return (out.omega_ref_rad_s if (guided and straight) else None), extra
+        return (out.omega_ref_rad_s if active else None), extra
     return hook
 
 
@@ -81,7 +93,8 @@ def main() -> None:
         report.append((name, 1000 * y_sw, math.degrees(a_sw), 1000 * y_end,
                        math.degrees(a_end), along_end, full_m, coll))
         if guided:
-            ty, ta = (TOL_Y0_MM, TOL_A0_DEG) if delta == 0 else (TOL_Y5_MM, TOL_A5_DEG)
+            ty, ta = {0.0: (TOL_Y0_MM, TOL_A0_DEG), 1.0: (TOL_Y1_MM, TOL_A1_DEG),
+                      5.0: (TOL_Y5_MM, TOL_A5_DEG)}[abs(delta)]
             ok_all &= abs(1000 * y_end) <= ty and abs(math.degrees(a_end)) <= ta and not coll
 
     print("\nStep 8c live check (corridor guidance v2, T1 START corridor)")
@@ -95,8 +108,8 @@ def main() -> None:
     print(f"lateral error after 5 deg: guided {g5:.1f} mm vs open loop {abs(o[3]):.1f} mm "
           f"(x{abs(o[3]) / max(g5, 1e-3):.0f} smaller)")
     print(f"verdict: {'PASS' if ok_all else 'CHECK (see values)'}  "
-          f"(G0: |y|<={TOL_Y0_MM} mm, |a|<={TOL_A0_DEG} deg; G+-5: |y|<={TOL_Y5_MM} mm, "
-          f"|a|<={TOL_A5_DEG} deg; no collision)")
+          f"(G0: {TOL_Y0_MM} mm/{TOL_A0_DEG} deg; G+-1: {TOL_Y1_MM} mm/{TOL_A1_DEG} deg; "
+          f"G+-5: {TOL_Y5_MM} mm/{TOL_A5_DEG} deg; no collision)")
     print(f"logs: {RESULTS}")
 
 

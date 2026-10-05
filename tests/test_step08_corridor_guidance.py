@@ -12,6 +12,7 @@ from corridor_world import HALF_WIDTH_M, CorridorWorld
 from navigation.corridor_guidance import (
     OMEGA_MAX_RAD_S, CorridorGuidance, measure_corridor,
 )
+from core.yaw_friction import YAW_FF_COMMAND, yaw_friction_feedforward
 from navigation.motion_controller import MotionController
 from perception.proximity_types import ProximityReading
 
@@ -19,16 +20,21 @@ V = 0.25
 ROBOT_HALF_WIDTH_M = 0.17
 
 
-def drive(world, x0=0.0, y0=0.0, th0=0.0, dist=2.0, guided=True, guidance=None):
+# rotation-mode model fitted to live step-8c run 1 (rms 0.29 deg)
+LIVE_YAW = dict(yaw_inertia=0.004, yaw_friction=0.0875)
+
+
+def drive(world, x0=0.0, y0=0.0, th0=0.0, dist=2.0, guided=True, guidance=None,
+          plant_kw=None, ff=False):
     """Straight at V with (or without) guidance. Returns list of (x, y, th, mode, w)."""
-    p = DrivePlant(x0, y0, th0)
+    p = DrivePlant(x0, y0, th0, **(plant_kw or {}))
     g = guidance or CorridorGuidance()
     trace, inc = [], p.step(0.0, 0.0)
     while p.x - x0 < dist:
         g.update_odometry(inc.dtheta_rad)
         out = g.command(world.snapshot(p.x, p.y, p.th))
         w = out.omega_ref_rad_s if guided else 0.0
-        inc = p.step(V, w)
+        inc = p.step(V, w, yaw_friction_feedforward(w) if ff else 0.0)
         trace.append((p.x, p.y, p.th, out.mode, w))
     return trace, p, g
 
@@ -117,12 +123,36 @@ class TestGuidance(unittest.TestCase):
             inc = p.step(0.0, ref.angular_velocity_rad_s)
         self.assertLess(abs(math.degrees(g.theta_rel - g.axis)), 0.6)
 
+    def test_root_corridor_with_live_yaw_friction(self):
+        """T1 START corridor (openings from 1.058 m), plant with the fitted yaw
+        friction, robot 4 deg off: without feed-forward the residual tilt at the
+        ROOT centre exceeds 0.5 deg (as live run 1); with it, it is within."""
+        world = CorridorWorld(gaps=(("left", 1.058, 1.787), ("right", 1.058, 1.787)))
+        res = {}
+        for ff in (False, True):
+            tr, p, _ = drive(world, th0=math.radians(4.0), dist=1.4226, plant_kw=LIVE_YAW, ff=ff)
+            res[ff] = (abs(p.y), abs(math.degrees(p.th)), tr)
+        self.assertGreater(res[False][1], 0.5)
+        self.assertLess(res[True][0], 0.010)
+        self.assertLess(res[True][1], 0.5)
+        ws = [w for *_, w in res[True][2]]
+        self.assertLessEqual(sum(1 for a, b in zip(ws, ws[1:]) if a * b < 0), 3)   # no chattering
+
     def test_none_without_axis(self):
         g = CorridorGuidance()
         g.reset(axis_known=False)
         snap = CorridorWorld(gaps=(("left", -1, 5), ("right", -1, 5))).snapshot(1.0, 0.0, 0.0)
         self.assertEqual(g.command(snap).mode, "NONE")
         self.assertEqual(g.command(snap).omega_ref_rad_s, 0.0)
+
+
+class TestYawFeedForward(unittest.TestCase):
+    def test_shape(self):
+        self.assertEqual(yaw_friction_feedforward(0.0), 0.0)
+        self.assertAlmostEqual(yaw_friction_feedforward(0.025), YAW_FF_COMMAND / 2)
+        self.assertEqual(yaw_friction_feedforward(1.0), YAW_FF_COMMAND)
+        self.assertEqual(yaw_friction_feedforward(-1.0), -YAW_FF_COMMAND)
+        self.assertEqual(yaw_friction_feedforward(0.3, u_f=0.0), 0.0)
 
 
 if __name__ == "__main__":

@@ -85,3 +85,46 @@ Kriteriji:
 - G0: |y| ≤ 3 mm, |α| ≤ 0.3°
 - G±5: |y| ≤ 10 mm, |α| ≤ 0.5°
 - nema kolizije
+
+### Live run 1 (5. 10. 2026) – procjena izvrsna, aktuator nije
+
+| run | y na ROOT-u | α na ROOT-u |
+|---|---:|---:|
+| G0 | −0.03 mm | −0.001° |
+| G+5 | −11.7 mm | +0.66° |
+| G−5 | +12.1 mm | −0.56° |
+| O+5 | +113 mm | +4.56° |
+
+Usporedba s GT-om iz CSV-a:
+- **Procjena je točna:** α̂ prati GT unutar 0.01°, ŷ unutar 0.04 mm i u dinamici. Mjerni model je
+  dobar.
+- **Robot ne slijedi male kutne brzine.** Robot počne skretati tek 0.3 s nakon naredbe. U HOLD-u
+  regulator 1.5 s traži ω = +0.086 rad/s, a robot se uopće ne okreće.
+
+Uzrok: pri vožnji ravno kotačići i trenje gume pri bočnom klizanju (scrub) daju moment trenja
+(Coulomb + statičko trenje) na rotacijski (diferencijalni) način gibanja. PI kotača potreban
+diferencijalni moment gradi samo integratorom, tijekom 1–2 s. Offline model to nije imao.
+
+Identifikacija: offline modelu dodan je rotacijski način (dodatna inercija J_y, trenje F_y sa
+statičkim trenjem) i parametri su prilagođeni live logovima G±5 ponavljanjem zabilježenog ω_ref:
+J_y = 0.004 kg·m², F_y = 0.0875 N·m po kotaču, rms pogreške smjera 0.29°.
+
+Rješenja ispitana na tom modelu:
+- **Integralno djelovanje na pogrešku smjera** – ODBAČENO. Uz statičko trenje daje granične cikluse
+  (robot zapne → integrator naraste → robot se otrgne i prebaci).
+- **Kompenzacija trenja unaprijednom vezom (feed-forward)** – PRIHVAĆENO (core/yaw_friction.py):
+
+      u_ff = U_F·sat(ω_ref / 0.05 rad/s),   U_F = 0.12   (desni += u_ff, lijevi −= u_ff)
+
+  U_F je ≈ 80 % procijenjenog trenja (namjerno pod-kompenzirano). Od ispitanih kandidata jedino ovaj
+  nema titranje (chattering) za F_y od 0.06 do 0.115 N·m (±30 %). Primjenjuje se samo u ravnoj
+  vožnji. Okreti u mjestu rade s velikim ω i validirani su bez kompenzacije.
+
+Offline očekivanje uz kompenzaciju:
+- G±5: |y| ≈ 3 mm, |α| ≈ 0.34°
+- G±1: |y| ≈ 3.5 mm, |α| < 0.03°
+
+Live run 2 dodaje G±1, jer je realni poremećaj nakon okreta ≈ 0.6°. Kriterij za G±1: 5 mm / 0.3°.
+
+Mogući pokus kasnije: iste kompenzacije u sporom završetku okreta, gdje nastaje ostatak od ≈ 0.6°
+(korak 7).
