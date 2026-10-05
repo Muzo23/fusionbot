@@ -35,7 +35,7 @@ def replay_opening(side):
     p = ProximityPerception()
     events, prev = {}, OpeningState.WALL
     states = []
-    for row in csv.DictReader(open(DATA / f"step06_opening_{side}.csv")):
+    for row in _rows(DATA / f"step06_opening_{side}.csv"):
         out = p.update(snap_from_row(row))
         st = out.left_state if side == "left" else out.right_state
         if st is not prev and st.value not in events:
@@ -43,6 +43,11 @@ def replay_opening(side):
         states.append(st)
         prev = st
     return events, states
+
+
+def _rows(path):
+    with open(path, newline="") as f:
+        return list(csv.DictReader(f))
 
 
 class TestOpeningReplay(unittest.TestCase):
@@ -67,7 +72,7 @@ class TestOpeningReplay(unittest.TestCase):
 
     def test_other_side_stays_wall(self):
         p = ProximityPerception()
-        for row in csv.DictReader(open(DATA / "step06_opening_left.csv")):
+        for row in _rows(DATA / "step06_opening_left.csv"):
             out = p.update(snap_from_row(row))
             if float(row["axle_x_m"]) < 0.95:   # the test scene's opposite wall ends at ~+1.0 m
                 self.assertIs(out.right_state, OpeningState.WALL)
@@ -79,7 +84,7 @@ class TestFrontReplay(unittest.TestCase):
     def _check(self, tag):
         p = ProximityPerception()
         first_blocked = first_brake = None
-        for i, row in enumerate(csv.DictReader(open(DATA / f"step06_front_{tag}.csv"))):
+        for i, row in enumerate(_rows(DATA / f"step06_front_{tag}.csv")):
             det = row["front_detected"] == "1"
             d = float(row["front_distance_m"]) if det and row["front_distance_m"] else None
             wall = ProximityReading("x", True, 0.18)

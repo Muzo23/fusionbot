@@ -17,16 +17,17 @@ from navigation.motion_controller import MotionMode
 from perception.proximity_types import ProximityReading, ProximitySnapshot
 
 LIVE_YAW = dict(yaw_inertia=0.004, yaw_friction=0.0875)
+LIVE_TURN_SLIP = 0.0067            # live step 7: body turns ~0.6 deg less per 90 deg than odometry says
 # rough robot outline (robot frame, m): front bumper, front corners, sides, rear corners
 BODY_POINTS = ((0.335, 0.0), (0.33, 0.09), (0.33, -0.09), (0.15, 0.17), (0.15, -0.17),
                (-0.10, 0.17), (-0.10, -0.17), (0.0, 0.17), (0.0, -0.17))
 
 
 class MazeSim:
-    def __init__(self, spec, yaw=LIVE_YAW):
+    def __init__(self, spec, yaw=LIVE_YAW, turn_slip=0.0):
         self.walls = WallMap(spec)
         x, y, th = spec.start_pose
-        self.plant = DrivePlant(x, y, th, **yaw)
+        self.plant = DrivePlant(x, y, th, turn_slip=turn_slip, **yaw)
         self.t = 0.0
         self.collision = False
         self.min_clearance = math.inf

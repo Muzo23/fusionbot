@@ -29,6 +29,11 @@ def obs(kind=ReferenceKind.SIDE_CONFIRMED, l=False, s=False, r=False):
     return JunctionObservation(kind, l, s, r, None, 0.0)
 
 
+def _rows(path):
+    with open(path, newline="") as f:
+        return list(csv.DictReader(f))
+
+
 class TestDirections(unittest.TestCase):
     def test_snap_and_rotate(self):
         self.assertIs(snap_heading(0.0), Dir.E)
@@ -140,11 +145,11 @@ class TestLiveReplay(unittest.TestCase):
     """The 45 junction events of the live step-9 run (T1, left-hand) with the
     pose at each event: GT and odometry reconstructed from the live log."""
 
-    def _replay(self, use_gt):
+    def _replay(self, use_gt, edge_association=True):
         spec = MAZES["T1"]
-        ev = list(csv.DictReader(open(DATA / "step09_live_events.csv")))
-        ps = list(csv.DictReader(open(DATA / "step09_live_event_poses.csv")))
-        mem = MazeMemory()
+        ev = _rows(DATA / "step09_live_events.csv")
+        ps = _rows(DATA / "step09_live_event_poses.csv")
+        mem = MazeMemory(edge_association=edge_association)
         mem.start(*spec.start_pose)
         gt = []
         for e, p in zip(ev, ps):
@@ -158,23 +163,47 @@ class TestLiveReplay(unittest.TestCase):
         return mem, evaluate_memory(mem, spec, gt)
 
     def test_with_gt_pose_memory_is_exact(self):
-        _, r = self._replay(True)
-        self.assertTrue(r["correct"], r)
+        for ea in (False, True):
+            _, r = self._replay(True, edge_association=ea)
+            self.assertTrue(r["correct"], r)
 
-    def test_with_live_odometry_recognition_fails_at_the_end(self):
-        """Configuration A on real data: recognition holds while the odometry
-        error stays below the radius, the match distance grows with time, and
-        the return to ROOT after 500 s (odometry heading drift 11 deg) is no
-        longer recognised -> ROOT and START are stored twice."""
-        mem, r = self._replay(False)
+    def test_metric_only_recognition_fails_at_the_end(self):
+        """Step-10 variant (every arrival by position), configuration A on real
+        data: recognition holds while the odometry error stays below the radius,
+        the match distance grows with time, and the return to ROOT after 500 s
+        (heading drift 11 deg) is not recognised -> ROOT and START duplicated."""
+        mem, r = self._replay(False, edge_association=False)
         self.assertFalse(r["correct"])
         self.assertEqual(r["duplicates"], ["R", "__START__"])
         self.assertEqual(r["false_merges"], [])
-        first_new_revisit = next(i for i, a in enumerate(mem.log) if a.is_new and i > 21 and
-                                 mem.log[i].junction > 22)
-        self.assertEqual(first_new_revisit, 42)
+        first_dup = next(i for i, a in enumerate(mem.log) if a.is_new and a.junction > 22)
+        self.assertEqual(first_dup, 42)
         self.assertGreater(mem.log[41].match_distance_m, 0.30)           # S, just before
 
+    def test_edge_association_keeps_tree_map_correct(self):
+        """Step-11 refinement: returns along known corridors are associated
+        topologically. The same live odometry gives a correct T1 map; the drift
+        stays visible as inconsistent (distance > radius) associations."""
+        mem, r = self._replay(False)
+        self.assertTrue(r["correct"], r)
+        bad = [i for i, a in enumerate(mem.log) if a.inconsistent]
+        self.assertEqual(bad, [42, 43, 44])
+        self.assertEqual(mem.summary()["edge_associations"], 23)
+
+
+class TestGraphExport(unittest.TestCase):
+    def test_graph_dict_fields(self):
+        from mapping.graph_map import graph_to_dict
+        m = MazeMemory()
+        m.start(0.0, -1.4226, math.pi / 2)
+        a = m.observe(obs(l=True), 0.0, -D, math.pi / 2)
+        m.depart(Dir.W)
+        g = graph_to_dict(m)
+        self.assertEqual([j["id"] for j in g["junctions"]], [0, a.junction])
+        self.assertEqual(g["junctions"][1]["exits"], ["S", "W"])
+        self.assertEqual(len(g["edges"]), 2)                 # START-R closed, R-W open
+        self.assertIsNone(g["edges"][1]["b"])
+        self.assertEqual(len(g["events"]), 1)
 
 
 if __name__ == "__main__":

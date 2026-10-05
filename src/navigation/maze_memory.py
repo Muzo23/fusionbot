@@ -22,9 +22,19 @@ odometry heading drift was 11 deg after 526 s).
 Junction centre estimate = reference pose + D * (cos th, sin th) with
 D = D_SIDE_CANONICAL (side opening) or D_DEAD_END_CANONICAL (dead end).
 
-Recognition (matching)
-----------------------
-An event is matched to a stored junction if
+Association (which junction is this?)
+--------------------------------------
+1. Along a KNOWN edge (both ends already stored): the arrival junction is the
+   other end of that edge - topological, independent of the pose estimate
+   (step 11 refinement of the 5. 10. decision: "when backtracking DFS relies on
+   the graph, recognition is only for loop closure"). The metric distance is
+   still logged as a consistency measure (association "EDGE").
+2. Along a NEW edge: metric recognition (association "MATCH" or "NEW").
+   With edge_association=False every event uses metric recognition (the
+   step-10 variant, kept for comparison: with live odometry it duplicated ROOT
+   and START after ~500 s in T1).
+
+Metric recognition: an event is matched to a stored junction if
     1. the estimated centres are within JUNCTION_MATCH_RADIUS_M (0.373 m,
        half-way between the nominal scatter 0.204 m and half the pitch), and
     2. the exit sets agree (topological signature: the same global exits).
@@ -121,17 +131,20 @@ class Arrival:
     arrival_exit: Dir                  # exit through which the robot entered (= opposite heading)
     exits: frozenset[Dir]
     centre_xy: tuple[float, float]
-    match_distance_m: float | None     # distance to the matched junction (None if new)
+    match_distance_m: float | None     # distance to the matched / edge-associated junction (None if new)
     rejected_structure: tuple[int, ...]  # junctions within radius but with different exits
     edge: int | None                   # edge closed by this arrival
     loop_closure: bool                 # arrived at a known junction through a new edge
+    association: str = "NEW"           # NEW / MATCH (metric) / EDGE (known edge)
+    inconsistent: bool = False         # EDGE association with different exits or distance > radius
 
 
 class MazeMemory:
-    def __init__(self, match_radius_m: float = JUNCTION_MATCH_RADIUS_M) -> None:
+    def __init__(self, match_radius_m: float = JUNCTION_MATCH_RADIUS_M, edge_association: bool = True) -> None:
         if match_radius_m <= 0:
             raise ValueError("match radius must be > 0")
         self.radius = float(match_radius_m)
+        self.edge_association = bool(edge_association)
         self.junctions: dict[int, Junction] = {}
         self.edges: dict[int, Edge] = {}
         self.current: int | None = None
@@ -161,6 +174,26 @@ class MazeMemory:
         heading = snap_heading(theta)
         exits = frozenset(relative_exits(obs, heading).values())
         cx, cy = self.centre_estimate(obs, x, y, theta)
+        arrival_exit = opposite(heading)
+
+        if self.edge_association and self._pending is not None:
+            e = self.edges[self._pending]
+            if e.b is not None:
+                src = self.current
+                tgt, tgt_dir = e.other(src) if not (e.a == e.b) else (e.b, e.dir_b)
+                j = self.junctions[tgt]
+                d = math.hypot(j.x - cx, j.y - cy)
+                inconsistent = (j.exits != exits) or tgt_dir != arrival_exit or d > self.radius
+                if j.exits != exits:
+                    j.exits = j.exits | exits          # keep every exit ever seen (robust depart)
+                j.visits += 1
+                e.traversals += 1
+                self._pending = None
+                self.current = j.id
+                arr = Arrival(j.id, False, heading, arrival_exit, exits, (cx, cy), d, (), e.id, False,
+                              "EDGE", inconsistent)
+                self.log.append(arr)
+                return arr
 
         best, best_d, rejected = None, None, []
         for j in sorted(self.junctions.values(), key=lambda j: j.id):
@@ -182,7 +215,6 @@ class MazeMemory:
             best.visits += 1
             is_new = False
 
-        arrival_exit = opposite(heading)
         edge_id, loop = None, False
         if self._pending is not None:
             e = self.edges[self._pending]
@@ -208,7 +240,8 @@ class MazeMemory:
 
         self.current = best.id
         arr = Arrival(best.id, is_new, heading, arrival_exit, exits, (cx, cy),
-                      None if is_new else best_d, tuple(rejected), edge_id, loop)
+                      None if is_new else best_d, tuple(rejected), edge_id, loop,
+                      "NEW" if is_new else "MATCH")
         self.log.append(arr)
         return arr
 
@@ -244,6 +277,8 @@ class MazeMemory:
             "open_edges": len(self.edges) - len(closed),
             "loop_closures": sum(a.loop_closure for a in self.log),
             "structure_rejections": sum(bool(a.rejected_structure) for a in self.log),
+            "edge_associations": sum(a.association == "EDGE" for a in self.log),
+            "inconsistent_edge_associations": sum(a.inconsistent for a in self.log),
         }
 
 

@@ -26,9 +26,12 @@ class DrivePlant:
     J = 0.004
 
     def __init__(self, x=0.0, y=0.0, th=0.0, track=rc.EFFECTIVE_WHEEL_SEPARATION_M,
-                 yaw_inertia=0.0, yaw_friction=0.0):
+                 yaw_inertia=0.0, yaw_friction=0.0, turn_slip=0.0):
         self.x, self.y, self.th, self.track = x, y, th, track
         self.jy, self.fy = float(yaw_inertia), float(yaw_friction)
+        # turn_slip: in in-place rotation the BODY turns (1 - turn_slip) of what the
+        # wheels (encoders) say; live step 7: ~0.6 deg per 90 deg -> 0.0067
+        self.turn_slip = float(turn_slip)
         self.ml, self.mr = MotorModel(), MotorModel()
         self.wl = self.wr = self.ql = self.qr = 0.0
         self.el, self.er = IncrementalEncoder(), IncrementalEncoder()
@@ -74,6 +77,8 @@ class DrivePlant:
             self.qr += self.wr * h
             v = rc.WHEEL_RADIUS_M * (self.wl + self.wr) / 2
             w = rc.WHEEL_RADIUS_M * (self.wr - self.wl) / self.track
+            if self.turn_slip and abs(v) < 0.02:
+                w *= 1.0 - self.turn_slip
             self.x += v * math.cos(self.th + w * h / 2) * h
             self.y += v * math.sin(self.th + w * h / 2) * h
             self.th += w * h
