@@ -73,9 +73,14 @@ def start_guard(p) -> None:
 class Mission:
     """Sequencer: straight -> settle -> (turn -> settle) x 4 -> done."""
 
-    def __init__(self, turns=TURNS_DEG, alpha=None) -> None:
+    def __init__(self, turns=TURNS_DEG, alpha=None, primitives=None, speed=V) -> None:
+        """primitives: list of ("straight", distance_m) / ("turn", deg); default is
+        START->ROOT followed by `turns`."""
         self.mc = MotionController(alpha_max_rad_s2=alpha)
-        self.queue = [("straight", None)] + [("turn", d) for d in turns]
+        self.speed = speed
+        if primitives is None:
+            primitives = [("straight", START_TO_ROOT_M)] + [("turn", d) for d in turns]
+        self.queue = list(primitives)
         self.phase, self.label = "idle", ""
         self.t_mark = 0.0
         self.still = 0
@@ -87,13 +92,14 @@ class Mission:
             self.phase = "done"
             return
         kind, deg = self.queue.pop(0)
-        self.cur = {"kind": kind, "target_deg": deg, "t0": t,
+        self.cur = {"kind": kind, "target_deg": deg if kind == "turn" else None,
+                    "distance_m": deg if kind == "straight" else None, "t0": t,
                     "odo_th0": stack.odo.heading_unwrapped, "odo_s0": stack.odo.signed_distance_m,
                     "gt_th0": gt["th_unwrapped"], "gt_x0": gt["x"], "gt_y0": gt["y"]}
         stack.pl.reset()          # every primitive starts from a clean PI state
         stack.pr.reset()
         if kind == "straight":
-            self.mc.start_straight(V)
+            self.mc.start_straight(self.speed)
             self.label = "straight"
         else:
             self.mc.start_turn_degrees(deg)
@@ -106,7 +112,7 @@ class Mission:
             self.next_primitive(t, stack, gt)
         if self.phase == "move":
             if self.mc.mode is MotionMode.STRAIGHT and \
-                    stack.odo.signed_distance_m - self.cur["odo_s0"] >= START_TO_ROOT_M:
+                    stack.odo.signed_distance_m - self.cur["odo_s0"] >= self.cur["distance_m"]:
                 self.mc.stop()
                 self._to_settle(t, stack)
             else:
@@ -137,11 +143,14 @@ class Mission:
         self.phase, self.t_mark, self.still = "settle", t, 0
 
 
-def run_mission(turns, csv_name, alpha=None):
-    """One simulation run: START -> ROOT -> turns. Returns (results, rows)."""
+def run_mission(turns, csv_name, alpha=None, primitives=None, speed=V, hook=None):
+    """One simulation run: START -> ROOT -> turns. Returns (results, rows).
+
+    hook(mission, state, inc, v, w) -> (w_override | None, extra_columns: dict)
+    is called every tick after the mission (used by step 8 for the guidance)."""
     sim = RemoteAPIClient().require("sim")
     original_rt = prepare_lockstep(sim)
-    stack, mission = Stack(), Mission(turns, alpha)
+    stack, mission = Stack(), Mission(turns, alpha, primitives, speed)
     rows, gt = [], None
     link = LockstepSession()
     try:
@@ -167,6 +176,11 @@ def run_mission(turns, csv_name, alpha=None):
             sr = stack.er.update(s.right_joint_position_rad, rc.SIMULATION_TIMESTEP_S)
             inc = stack.odo.update(sl.delta_counts, sr.delta_counts)
             v, w = mission.step(t, stack, inc, gt, sl, sr)
+            extra = {}
+            if hook is not None:
+                w_over, extra = hook(mission, s, inc, v, w)
+                if w_over is not None:
+                    w = w_over
             wl, wr = rc.wheel_speeds_from_body(v, w)
             cl = stack.pl.update(wl, sl.speed_rad_s).command
             cr = stack.pr.update(wr, sr.speed_rad_s).command
@@ -176,6 +190,10 @@ def run_mission(turns, csv_name, alpha=None):
                 "odo_th_unwrapped": stack.odo.heading_unwrapped, "odo_s": stack.odo.signed_distance_m,
                 "gt_x": gt["x"], "gt_y": gt["y"], "gt_th_unwrapped": gt["th_unwrapped"],
                 "collision": int(s.collision or s.visual_collision),
+                **{f"d_{n}": (getattr(s.proximity, n).distance_m
+                              if getattr(s.proximity, n).detected else None)
+                   for n in ("left", "front_left", "front", "front_right", "right")},
+                **extra,
             })
             if t > 180.0:
                 raise RuntimeError("mission timeout (180 s simulated)")
