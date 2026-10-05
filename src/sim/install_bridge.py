@@ -240,7 +240,7 @@ def main() -> None:
     print()
     print("DIRECT-ZMQ INSTALLATION COMPLETE")
     print("Save the CoppeliaSim scene now (Ctrl+S).")
-    print("Next: python -m experiments.check_lockstep")
+    print("Next: python -m checks.step05_live_drive")
 
 
 if __name__ == "__main__":
