@@ -1,5 +1,5 @@
 """
-Step 11 LIVE check: autonomous DFS exploration of T1 (configuration A).
+Step 11 LIVE check: autonomous DFS exploration (configuration A), T1 / T2 / T3.
 
 The robot explores the maze on its own: FSM (step 9) + DFS (step 11) over
 MazeMemory (step 10), every junction placed with the ODOMETRY pose estimate
@@ -11,9 +11,10 @@ GT only for the report: true node of every event, evaluation of the memory
 against the maze graph (duplicates / false merges / edges), clearance.
 At the end the topological map is saved (JSON) and drawn over the true walls.
 
-    python -m checks.step11_live_dfs      (from src/, scene T1, robot at START)
+    python -m checks.step11_live_dfs              (from src/, scene T1, robot at START)
+    python -m sim.maze_scene T3  then  python -m checks.step11_live_dfs --maze T3
 
-Logs: results/step11/dfs_ticks.csv, dfs_events.csv, graph_T1_A.json, graph_T1_A.png
+Logs: results/step11/dfs_ticks.csv, dfs_events.csv, graph_<maze>_A.json/.png
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ from navigation import navigation_config as cfg
 from navigation.junction_types import ReferenceKind
 from navigation.motion_controller import MotionMode
 from navigation.navigation_fsm import NavigationFSM, NavState
+from sim.maze_scene import scene_maze_id
 from sim.sim_utils import prepare_lockstep, wait_until_stopped
 from sim.transport import LockstepSession
 
@@ -67,6 +69,12 @@ def main() -> None:
     expected = expected_left_hand_events(spec, 43) if args.maze == "T1" else []
 
     sim = RemoteAPIClient().require("sim")
+    scene_id = scene_maze_id(sim)
+    if scene_id is not None and scene_id != args.maze:
+        raise SystemExit(f"the scene contains maze {scene_id}, not {args.maze}: "
+                         f"run  python -m sim.maze_scene {args.maze}  or pass --maze {scene_id}")
+    if scene_id is None:
+        print(f"(scene has no maze id - assuming it is {args.maze}, e.g. built by the old generator)")
     original_rt = prepare_lockstep(sim)
     stack = Stack()
     memory = MazeMemory()
@@ -159,7 +167,7 @@ def main() -> None:
         sim.setBoolProperty(sim.handle_scene, "realtimeSimulation", original_rt)
 
     RESULTS.mkdir(parents=True, exist_ok=True)
-    for name, rows in (("dfs_ticks.csv", ticks), ("dfs_events.csv", events)):
+    for name, rows in ((f"dfs_{args.maze}_ticks.csv", ticks), (f"dfs_{args.maze}_events.csv", events)):
         if rows:
             with (RESULTS / name).open("w", newline="") as f:
                 w = csv.DictWriter(f, fieldnames=list(rows[0]))
@@ -208,9 +216,12 @@ def main() -> None:
     print(f"min body clearance (GT): {1000 * min_clear:.1f} mm")
     print(f"collision        : {coll}")
     print(f"simulated / wall time: {ticks[-1]['t']:.0f} s / {time.perf_counter() - wall0:.0f} s")
-    ok = (fsm.state is NavState.FINISHED and dfs.finished_reason == "complete" and dfs.steps[-1].arrival.junction == 0
-          and ev_report["correct"] and not coll and (not expected or n_ok == len(events)))
-    print(f"verdict          : {'PASS' if ok else 'CHECK (see values)'}")
+    nav_ok = (fsm.state is NavState.FINISHED and dfs.finished_reason == "complete"
+              and dfs.steps[-1].arrival.junction == 0 and not coll and (not expected or n_ok == len(events)))
+    print(f"navigation       : {'PASS' if nav_ok else 'CHECK'}  (explored, back at START, no collision)")
+    print(f"topological map  : {'CORRECT' if ev_report['correct'] else 'INCORRECT'}  "
+          f"(a measured result of the configuration, not a pass criterion: in T3 configuration A is "
+          f"expected to miss the ring closure)")
     print(f"logs + map       : {RESULTS}")
 
 

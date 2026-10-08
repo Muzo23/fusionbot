@@ -45,6 +45,13 @@ def _inside(rects, x, y) -> bool:
 
 def boundary_segments(spec: MazeSpec) -> list[tuple[str, float, float, float]]:
     """Wall segments as (axis, start, end, fixed): 'V' = x fixed, spans y; 'H' = y fixed, spans x."""
+    return [w[:4] for w in boundary_walls(spec)]
+
+
+def boundary_walls(spec: MazeSpec) -> list[tuple[str, float, float, float, str]]:
+    """Like boundary_segments plus the side where the SOLID (outside) region is:
+    'L'/'R' for V segments (solid at smaller / larger x), 'B'/'T' for H segments
+    (solid at smaller / larger y). The physical wall is built on that side."""
     rects = free_rectangles(spec)
     xs = sorted({round(v, 12) for r in rects for v in (r[0], r[1])})
     ys = sorted({round(v, 12) for r in rects for v in (r[2], r[3])})
@@ -66,16 +73,16 @@ def boundary_segments(spec: MazeSpec) -> list[tuple[str, float, float, float]]:
         if not free.get((i, j + 1), False):
             raw[("H", round(y1, 12), "T")].append((x0, x1))
     segs = []
-    for (axis, fixed, _), iv in raw.items():
+    for (axis, fixed, side), iv in raw.items():
         iv.sort()
         s, e = iv[0]
         for a, b in iv[1:]:
             if abs(a - e) <= TOL:
                 e = max(e, b)
             else:
-                segs.append((axis, s, e, fixed))
+                segs.append((axis, s, e, fixed, side))
                 s, e = a, b
-        segs.append((axis, s, e, fixed))
+        segs.append((axis, s, e, fixed, side))
     segs.sort(key=lambda t: (t[0], t[3], t[1]))
     return segs
 

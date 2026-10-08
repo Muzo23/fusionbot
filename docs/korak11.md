@@ -66,3 +66,23 @@ Kriteriji:
 - bez kolizije.
 
 T2 i T3 live dolaze nakon generatora scene (korak 12).
+
+### Live rezultat (5. 10. 2026) – PASS
+
+| mjera | vrijednost |
+|---|---|
+| završetak | FINISH „complete” na J0 (START) |
+| događaji | 43 + FINISH, svi jednaki obilasku T1 |
+| memorija | 23 raskrižja, 22 brida, bez duplikata i lažnih spajanja |
+| pridruživanja | 22 po poznatom bridu, 2 nekonzistentna (R: 0.577 m, START: 0.902 m) |
+| zatvorena raskrižja | okidač − očekivano +0.2 … +2.4 mm |
+| najmanji razmak tijela | 12.6 mm, bez kolizije |
+| vrijeme | 515 s simulirano / 288 s stvarno |
+
+Slika: figures/step11_graph_T1_A_live.png. Desna grana je zakrenuta zbog drifta odometrije, ali je
+topologija potpuno točna.
+
+**Ponovljivost:** svi događaji dogodili su se u istom simuliranom trenutku kao u koraku 9 (4.20 s,
+20.07 s, … 500.46 s), uz isti put robota. Promijenio se samo donositelj odluka (pravilo lijeve ruke →
+DFS), a odluke su u stablu iste. Lockstep sustav je dakle potpuno determinističan, što je preduvjet za
+uparene Monte Carlo usporedbe konfiguracija (korak 20).
