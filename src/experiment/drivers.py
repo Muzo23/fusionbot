@@ -26,6 +26,9 @@ LIDAR_RAYS = 684
 
 
 def live_loop(run, spec, *, check_scene: bool = True, dyn: str | None = None):
+    from experiment.disturbances import OFFLINE_ONLY
+    if run.dist.id in OFFLINE_ONLY:
+        raise SystemExit(f"{run.dist.id} changes the drive physics - offline only (step 19)")
     from coppeliasim_zmqremoteapi_client import RemoteAPIClient
 
     from checks.step07_live_turns import start_guard
@@ -100,8 +103,10 @@ def offline_loop(run, spec, *, lidar: bool = False, turn_loss: float = 1.0, dyn:
         sys.path.insert(0, tests)
     from maze_sim import LIVE_TURN_DEFICIT, MazeSim            # noqa: E402  (test plant)
 
+    turn_loss = run.dist.turn_loss(turn_loss)                  # step 19 D1: slippery floor
     deficit = tuple(turn_loss * d for d in LIVE_TURN_DEFICIT) if turn_loss else None
     msim = MazeSim(spec, turn_deficit=deficit)
+    msim.plant.slip = run.dist.plant_slip()                     # step 19 D4: slip bursts (None = none)
     world = None
     if dyn:
         from mazes.dynamic import DynamicWorld, build_scenario

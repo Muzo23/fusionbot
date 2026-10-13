@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import math
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 PROFILES = ("ideal", "realistic")
 
@@ -130,6 +130,10 @@ class NoiseProfile:
     """One run's sensor models. Separate random streams per sensor, all from one seed."""
     name: str = "ideal"
     seed: int = 0
+    # step 19 (N1 / N2): sigma multipliers per sensor {"gyro": k, "lidar": k, "proximity": k}. Scales the random
+    # parts (gyro white noise, bias random walk, scale residual; LiDAR and proximity sigma); quantisation and
+    # the gyro start offset (removed by the start calibration) stay. Same seed -> same random draws.
+    scale: dict | None = None
     gyro: GyroModel = field(init=False)
     lidar: LidarModel = field(init=False)
     proximity: ProximityModel = field(init=False)
@@ -140,14 +144,20 @@ class NoiseProfile:
         ideal = self.name == "ideal"
         master = random.Random(self.seed)
         streams = [random.Random(master.getrandbits(64)) for _ in range(3)]
-        self.gyro = GyroModel(streams[0], ideal)
-        self.lidar = LidarModel(streams[1], ideal)
-        self.proximity = ProximityModel(streams[2], ideal)
+        k = {"gyro": 1.0, "lidar": 1.0, "proximity": 1.0, **(self.scale or {})}
+        g, l, q = GyroSpec(), LidarSpec(), ProximitySpec()
+        g = replace(g, noise_rms_rad_s=k["gyro"] * g.noise_rms_rad_s, bias_rw_rad_s_sqrt_s=k["gyro"] * g.bias_rw_rad_s_sqrt_s,
+                    scale_residual_sd=k["gyro"] * g.scale_residual_sd)
+        l = replace(l, sd_near_m=k["lidar"] * l.sd_near_m, sd_rel_far=k["lidar"] * l.sd_rel_far)
+        q = replace(q, sd_abs_m=k["proximity"] * q.sd_abs_m, sd_rel=k["proximity"] * q.sd_rel)
+        self.gyro = GyroModel(streams[0], ideal, g)
+        self.lidar = LidarModel(streams[1], ideal, l)
+        self.proximity = ProximityModel(streams[2], ideal, q)
 
     def describe(self) -> dict:
         """Everything needed to reproduce / report the run."""
         return {
-            "profile": self.name, "seed": self.seed,
+            "profile": self.name, "seed": self.seed, "scale": self.scale,
             "gyro": {**self.gyro.spec.__dict__, "drawn_initial_bias_rad_s": self.gyro.bias,
                      "drawn_scale_error": self.gyro.scale_error},
             "lidar": self.lidar.spec.__dict__,

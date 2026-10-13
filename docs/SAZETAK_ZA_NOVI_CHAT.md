@@ -1,4 +1,4 @@
-# FusionBot – sažetak za nastavak u novom chatu (12. 10. 2026., nakon koraka 15b)
+# FusionBot – sažetak za nastavak u novom chatu (13. 10. 2026., korak 19 implementiran, batch čeka)
 
 ## 1. Rad i pravila suradnje
 - Diplomski rad: **„Povećanje pouzdanosti autonomne navigacije primjenom metoda fuzije podataka u kompleksnim okruženjima”**, Leo Muzica, TF Rijeka, mentor doc. dr. sc. Nikola Anđelić, predmet Evolucijska robotika. Rok predaje: zadnji tjedan listopada 2026.
@@ -11,7 +11,7 @@
 - Pisanje rada: korisnik piše u svom LaTeX-u (`main.tex`); pisanje je zasad pauzirano. Prijedlog je poglavlje 3 pisati paralelno.
 - Korisnikovo računalo: `C:\Users\Agenor\Desktop\Diplomski Rad\fusionbot`, okruženje „FusionBot”, CoppeliaSim 4.10 + MuJoCo.
 
-## 2. Sustav (repozitorij `fusionbot`, korak 17 = commit 1949457; korak 15b u paketu `fusionbot_15b.zip`, za commit)
+## 2. Sustav (repozitorij `fusionbot`, korak 17 = commit 1949457; 15b i 19 u paketu `fusionbot_19.zip`, za commit)
 - **Robot:** diferencijalni pogon; r = 0,052975 m, B = 0,2901 m (izmjereno), B_eff = 0,3352 m (za okrete); 5 senzora blizine, IMU MPU-6050, LiDAR Hokuyo URG-04LX (10 Hz, 684 zrake). Brzina 0,25 m/s, dt 10 ms.
 - **Bridge:** lockstep ZMQ, protokol 2.2 (IMU svaki korak, LiDAR svaki 10., položaji dinamičkih prepreka u paketu naredbe). Nakon promjene `python -m sim.install_bridge` + Ctrl+S.
 - **Navigacija (ista u svim konfiguracijama):**
@@ -79,19 +79,30 @@
   - Ako rezultati nisu dostupni, ponoviti iz `src`: `python -m experiment.batch --config A B C D E --noise realistic --mazes T1 T2 T3 M1 M2 M3 M5 --seeds 1-2 --tag lid17 --extra --offline-lidar`.
   - Usporedbu složiti s `python -m evaluation.compare --tag lid17`.
 
+- **Korak 19 (13. 10.) – implementirano, cijeli batch još nije pokrenut:**
+  - `experiment/disturbances.py`: D1 sklizak pod (×2/3/5, offline), D2 polumjer (±1/±2 %), D3 razmak (±2/±5 %), D4 udari proklizavanja (1/3 %, offline), D5 skok biasa (+0,2/+0,5 °/s), D6 degradacija LiDAR-a (20/50 %), D7 pomak bočnog senzora +20 mm (L/R; odabrana opcija 1). D5–D7 kreću na sredini istraživanja (pola raskrižja u karti, u vožnji).
+  - N1 (σ svih senzora ×0,5/2/4/8) i N2 (jedan senzor ×2/4/8, samo T3): `NoiseProfile(scale=...)`, `run.py --noise-scale*`.
+  - `experiment/step19.py`: plan (729 vožnji, ~13 h na 2 jezgre, nastavljiv), `--dry-run`, `--report` (tablica + R2).
+  - Nova zaštita u EKF-u: oporavak od skoka biasa (20 odbijenih ZUPT-ova + konzistentne inovacije + 0,5 s bez impulsa enkodera). Nominalne vožnje nepromijenjene (replay).
+  - Nalazi iz dimnih testova: D4 3 % → SAFETY_ABORT (`closed_straight_guard` koristi odometriju, sve konfiguracije); C uz D5 ovisi o zaustavljanjima; **E se „zaključa” uz samouvjereni LiDAR** kad je PROX-LOC pristran (D7 R: 270 mm, gate odbacuje ispravne PROX-LOC korekcije).
+  - 226 testova prolazi. Dokumentacija `docs/korak19.md`.
+
 ## 4. Otvoreno / čeka
 - Korisnik: vožnje uživo D i E (T1 realistic, tag live17); `checks.robot_geometry` v2; vrsta kotačića.
 - **Pitati mentora:** je li dovoljan evolucijski dio iz 15b (diferencijalna evolucija nad parametrima šuma EKF-a, NEES + L1, Monte Carlo replay – već napravljeno) ili želi više (npr. usporedba DE i pretraživanja mreže, ili evolucija parametara vođenja); prihvaća li pretpostavku o mreži labirinta za B.
+- **Odluka (19):** zaštita od „zaključavanja” E (povećati kovarijancu poze nakon N odbijenih PROX-LOC korekcija) – ili samo opisati kao ograničenje.
+- **Pokrenuti batch 19** (server): `cd fusionbot\src` → `python -m experiment.step19 --tag s19` → `python -m experiment.step19 --tag s19 --report`.
+- Korisnik: rezultati testova 15b (PowerShell 5: bez `&&`, naredbe u zasebnim redcima).
 - **Potvrditi (15b):** COV_INFLATE za D odabran prema točnosti (100), iako bi unaprijed zadana funkcija cilja s NEES članom birala 1000 – D je nekonzistentan za svaku vrijednost (ANEES ≥ 140).
 - Uživo provjeriti NEES s novim Q (live17 D/E i ponoviti T1 A/C): offline pogon nema proklizavanja, uživo Q možda treba povećati.
 
 ## 5. Plan do kraja
 1. ~~15b – podešavanje šuma EKF-a i COV_INFLATE (DE na replayu)~~ – gotovo 12. 10.
-2. 19 – smetnje D1–D7 (sklizak pod, polumjer i razmak kotača, proklizavanje, skok biasa, degradacija LiDAR-a, kvar bočnog senzora) × A–E × realistic × T3 i M4 × 3 sjemena – 1 dan
+2. 19 – smetnje D1–D7 + N1–N2: kod gotov; batch (~13 h) i analiza – 0,5 dana rada + vrijeme batcha
 3. 20 – završni eksperimenti: uživo (A–E na odabranim labirintima, s preprekama i bez) + offline Monte Carlo – 2 dana
 4. analiza, tablice i slike za rad – 1 dan
 5. pisanje (poglavlja 3 i 4 iz `docs/korak*.md`), pregled, predaja
 
 ## 6. Datoteke za pisanje
-- `docs/korak13.md`, `korak14.md` (karta + 14b dinamika), `korak15.md` (EKF + C), `korak15b.md` (podešavanje šuma, DE), `korak16.md` (B), `korak17.md` (D, E).
+- `docs/korak13.md`, `korak14.md` (karta + 14b dinamika), `korak15.md` (EKF + C), `korak15b.md` (podešavanje šuma, DE), `korak16.md` (B), `korak17.md` (D, E), `korak19.md` (smetnje).
 - Projekt na claude.ai: `claude/odluke-i-stanje.md`.

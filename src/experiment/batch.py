@@ -31,7 +31,8 @@ COLUMNS = ("maze", "configuration", "noise", "seed", "S4_mission_success", "S1_e
            "K1_wall_rmse_mm", "K2_agreement_pct", "K2_coverage_pct", "P1_centreline_rms_mm", "P2_axis_angle_rms_deg", "P3_length_ratio",
            "P4_turn_err_rms_deg", "P5_turn_point_rms_mm", "P6_domega_rms_rad_s2", "P6_oscillations_per_m",
            "P7_clearance_min_mm", "P8_effort_per_m", "DYN_stops", "DYN_resumes", "DYN_turnbacks", "DYN_false_stops", "DYN_min_clearance_mm",
-           "simulated_s", "wall_time_s", "run_dir")
+           "simulated_s", "wall_time_s", "run_dir", "dist", "dist_level", "noise_scale", "dist_active_from_s",
+           "L1_pos_max_m", "L5_nees_mean", "T1_map_correct")
 
 
 def seeds_arg(text: str) -> list[int]:
@@ -42,9 +43,10 @@ def seeds_arg(text: str) -> list[int]:
     return out
 
 
-def one(job, tag, extra, dyn=None):
+def one(job, tag, extra, dyn=None, labels=()):
+    """labels: step 19 disturbance / noise labels, in the order run.py puts them into the folder name."""
     maze, cfg, noise, seed = job
-    parts = [dyn, "nogate" if "--no-gate" in extra else None, tag]
+    parts = [dyn, *labels, "nogate" if "--no-gate" in extra else None, tag]
     name = f"{maze}_{cfg}_{noise}_s{seed}_offline_" + "_".join(p for p in parts if p)
     cmd = [sys.executable, "-m", "run", "--offline", "--config", cfg, "--noise", noise, "--maze", maze,
            "--seed", str(seed), "--tag", tag, *extra]

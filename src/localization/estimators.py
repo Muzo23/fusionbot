@@ -139,7 +139,7 @@ class EkfEstimator:
 
     def stats(self) -> dict:
         return {"updates": {k: {"accepted": a, "rejected": r} for k, (a, r) in self.ekf.stats.items()},
-                "zupt_ticks": self.zupt_ticks, "lidar_no_match": self.lidar_skipped, "gyro_bias_final_deg_s": math.degrees(self.gyro_bias)}
+                "zupt_ticks": self.zupt_ticks, "bias_resets": len(self.ekf.bias_resets), "lidar_no_match": self.lidar_skipped, "gyro_bias_final_deg_s": math.degrees(self.gyro_bias)}
 
 
 IMPLEMENTED = ("A", "B", "C", "D", "E")

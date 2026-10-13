@@ -90,8 +90,12 @@ class DriveStack:
 
 class RobotRun:
     def __init__(self, spec, config: Configuration, noise: NoiseProfile, recorder, *, budget: int = 3000,
-                 goal: bool = True, max_time_s: float = 6000.0, lidar_files=None, gating: bool = True) -> None:
+                 goal: bool = True, max_time_s: float = 6000.0, lidar_files=None, gating: bool = True,
+                 disturbance=None) -> None:
         self.spec, self.config, self.noise, self.rec = spec, config, noise, recorder
+        from experiment.disturbances import Disturbance
+        self.dist = disturbance or Disturbance(None, noise.seed, len(spec.nodes_grid))     # step 19
+        self._junctions_seen: set = set()
         self.walls = WallMap(spec)
         self.max_time_s = max_time_s
         self.mount, self.range_model, self.lidar_cal = lidar_files or load_lidar_files()
@@ -179,7 +183,7 @@ class RobotRun:
         out = {}
         for n in SENSORS:
             r = getattr(snap, n)
-            d = self.noise.proximity.measure(r.distance_m if r.detected else None)
+            d = self.dist.proximity(n, self.noise.proximity.measure(r.distance_m if r.detected else None))
             out[n] = ProximityReading(n, r.detected and d is not None, d, r.detected_object_handle)
         return ProximitySnapshot(**out)
 
@@ -202,7 +206,7 @@ class RobotRun:
             angles.append(math.atan2(ys, xs))
             # range = horizontal distance from the scan centre (as in the step-12d calibration)
             ideal.append(None if d >= 0.9999 * LIDAR_MAX_M or d <= 0.0 else self.range_model.correct(math.hypot(xs, ys)))
-        measured = self.noise.lidar.measure(ideal)
+        measured = self.dist.scan(self.noise.lidar.measure(ideal))          # step 19 D6
         self.rec.scan(self.t, self.k, angles, ideal, measured, gt, est)
         self.n_scans += 1
         return {"angles": angles, "ranges": measured}
@@ -213,13 +217,20 @@ class RobotRun:
         self.t = t = s.simulation_time_s
         gt = (s.gt_axle_x_m, s.gt_axle_y_m, s.gt_heading_rad)
         self._last_gt = gt
+        ev = self.dist.maybe_trigger(t, len(self._junctions_seen),               # step 19: D5-D7 mid-explore
+                                     self.last_step is not None and self.last_step.state is NavState.FOLLOW, self.noise)
+        if ev:
+            self.dyn_log.append({"t": round(t, 3), "event": "disturbance_start", "label": self.dist.spec.label,
+                                 "gt_x": gt[0], "gt_y": gt[1]})
+            print(f"  disturbance t={t:7.1f}s {ev}")
+        ql, qr = self.dist.joints(s.left_joint_position_rad, s.right_joint_position_rad)   # step 19 D2 / D3
         gyro_ideal = s.imu_gyro_rad_s[2] if s.imu_gyro_rad_s else None
         gyro_meas = self.noise.gyro.measure(gyro_ideal, rc.SIMULATION_TIMESTEP_S) if gyro_ideal is not None else None
         if not self.started:
             if gyro_meas is not None:
                 self.gyro_cal.add(gyro_meas)
             if t >= HOLD_S:
-                self.drive.start(s.left_joint_position_rad, s.right_joint_position_rad, self.spec.start_pose)
+                self.drive.start(ql, qr, self.spec.start_pose)
                 if hasattr(self.estimator, "start"):
                     from mazes.maze_spec import PITCH_M, START_OFFSET_FROM_ROOT_M
                     sx, sy, _ = self.spec.start_pose            # known START cell + cell size (micromouse rules)
@@ -235,8 +246,8 @@ class RobotRun:
         self.k += 1
         prox = self._noisy_proximity(s.proximity)
         self._front_now = prox.front.distance_m if prox.front.detected else None   # the perception is frozen in TURN/EXIT
-        sl = self.drive.el.update(s.left_joint_position_rad, rc.SIMULATION_TIMESTEP_S)
-        sr = self.drive.er.update(s.right_joint_position_rad, rc.SIMULATION_TIMESTEP_S)
+        sl = self.drive.el.update(ql, rc.SIMULATION_TIMESTEP_S)
+        sr = self.drive.er.update(qr, rc.SIMULATION_TIMESTEP_S)
         inc = self.drive.odo.update(sl.delta_counts, sr.delta_counts)
         est_before = self.estimator.pose()
         scan = self._scan(s.lidar_xyzd, gt, est_before) if s.lidar_xyzd else None
@@ -311,6 +322,7 @@ class RobotRun:
         node = nearest_node(self.spec, *gt, ahead)
         self.gt_nodes.append(node)
         provider = self.mission or self.dfs
+        self._junctions_seen.add(provider.steps[-1].arrival.junction)
         step_ = provider.steps[-1]
         arr = step_.arrival
         e_pos = math.hypot(est[0] - gt[0], est[1] - gt[1])
@@ -388,6 +400,8 @@ class RobotRun:
             "dyn_stops": fsm.obstacle_stops, "dyn_resumes": fsm.obstacle_resumes,
             "dyn_turnbacks": fsm.obstacle_turnbacks,
             "dyn_blocked": self.mission.blocked_log if self.mission is not None else [],
+            **self.dist.summary(),
+            "noise_scale": self.noise.scale,
             **goal_info,
         }
         return out

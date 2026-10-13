@@ -38,6 +38,8 @@ class DrivePlant:
         self.turn_deficit = turn_deficit
         self._deficit_left = 0.0
         self._rotating = False
+        # step 19 D4: slip(v, w, h) -> (left, right) contact factors (1 = no slip); None = no slip
+        self.slip = None
         self.ml, self.mr = MotorModel(), MotorModel()
         self.wl = self.wr = self.ql = self.qr = 0.0
         self.el, self.er = IncrementalEncoder(), IncrementalEncoder()
@@ -83,6 +85,10 @@ class DrivePlant:
             self.qr += self.wr * h
             v = rc.WHEEL_RADIUS_M * (self.wl + self.wr) / 2
             w = rc.WHEEL_RADIUS_M * (self.wr - self.wl) / self.track
+            if self.slip is not None:                    # wheels spin, the body moves less (step 19 D4)
+                fl, fr = self.slip(v, w, h)
+                v = rc.WHEEL_RADIUS_M * (fl * self.wl + fr * self.wr) / 2
+                w = rc.WHEEL_RADIUS_M * (fr * self.wr - fl * self.wl) / self.track
             if self.turn_slip and abs(v) < 0.02:
                 w *= 1.0 - self.turn_slip
             if self.turn_deficit is not None:

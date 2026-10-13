@@ -53,6 +53,21 @@ Q_TH_GYRO_PER_RAD = 1.2731346080089327e-05  # 0.26 deg per 90 deg (0.3 % scale r
 GYRO_BIAS_RW = math.radians(0.002)         # rad/s per sqrt(s) (datasheet, not tuned: see experiment.tune)
 # ---- measurement noise
 ZUPT_SD = math.radians(0.05)               # one gyro sample at rest
+# ---- step 19: bias fault recovery. A sudden bias step (D5) makes every ZUPT innovation fail the gate, so
+# the filter would never learn the new bias. The robot is CERTAINLY at rest (encoders), so N consecutive
+# rejected ZUPTs mean the bias model is wrong, not the measurement: the bias is declared unknown
+# (variance BIAS_RESET_SD^2, correlations cleared) and the following ZUPTs learn it again.
+ZUPT_RECOVERY = True
+ZUPT_RECOVERY_N = 20                       # 0.2 s at rest (false alarm at a 99 % gate: 0.01^20)
+BIAS_RESET_SD = math.radians(1.0)
+# ... but the encoder rest test also passes while the body still settles after a turn (~28 % of the ZUPTs
+# are rejected in nominal runs, correctly). Those innovations VARY; a bias step gives a CONSTANT offset plus
+# white noise. Reset only if the rejected innovations are consistent (sd <= RECOVERY_SPREAD x gyro noise)
+# AND the robot is in DEEP rest: not a single encoder count on either wheel for RECOVERY_STILL ticks
+# (the normal rest test allows 1 count per 0.2 s = up to 0.3 deg/s of real rotation; 0.5 s of zero counts
+# bounds it to 0.11 deg/s, below the smallest D5 step).
+RECOVERY_SPREAD = 3.0
+RECOVERY_STILL = 50
 # ---- gating
 CI_OMEGAS = tuple(np.linspace(0.05, 0.95, 19))   # covariance intersection weights (step 15b)
 CHI2_95 = {1: 3.841, 2: 5.991, 3: 7.815}
@@ -76,6 +91,10 @@ class PoseEKF:
         self.stats: dict[str, list[int]] = {}       # update type -> [accepted, rejected]
         self._rest = deque(maxlen=REST_WINDOW)
         self.last_nis: dict[str, float] = {}
+        self._zupt_rejected = 0
+        self._still = 0
+        self._zupt_nu: deque = deque(maxlen=ZUPT_RECOVERY_N)
+        self.bias_resets: list[float] = []         # bias estimate before each reset [rad/s]
 
     # ------------------------------------------------------------------ start
     def start(self, x: float, y: float, th: float, *, bias: float = 0.0, bias_sd: float = 0.0,
@@ -163,13 +182,35 @@ class PoseEKF:
     # ------------------------------------------------------------------ ZUPT
     def at_rest(self, left_counts: int, right_counts: int) -> bool:
         self._rest.append((int(left_counts), int(right_counts)))
+        self._still = self._still + 1 if (left_counts == 0 and right_counts == 0) else 0
         w = self._rest
-        return (len(w) == w.maxlen and all(abs(a) <= REST_TOL and abs(b) <= REST_TOL for a, b in w)
+        rest = (len(w) == w.maxlen and all(abs(a) <= REST_TOL and abs(b) <= REST_TOL for a, b in w)
                 and abs(sum(a for a, _ in w)) <= REST_TOL and abs(sum(b for _, b in w)) <= REST_TOL)
+        if not rest:
+            self._zupt_rejected = 0
+            self._zupt_nu.clear()
+        return rest
 
     def zupt_update(self, omega: float) -> bool:
-        """Robot at rest: the gyro reads only its bias."""
-        return self.update("zupt", [omega], [self.x[3]], np.array([[0.0, 0.0, 0.0, 1.0]]), [[ZUPT_SD ** 2]])
+        """Robot at rest: the gyro reads only its bias (+ step-19 bias fault recovery)."""
+        H = np.array([[0.0, 0.0, 0.0, 1.0]])
+        if self.update("zupt", [omega], [self.x[3]], H, [[ZUPT_SD ** 2]]):
+            self._zupt_rejected = 0
+            self._zupt_nu.clear()
+            return True
+        self._zupt_rejected += 1
+        self._zupt_nu.append(float(omega - self.x[3]))
+        if not ZUPT_RECOVERY or self._zupt_rejected < ZUPT_RECOVERY_N:
+            return False
+        if self._still < RECOVERY_STILL or float(np.std(self._zupt_nu)) > RECOVERY_SPREAD * ZUPT_SD:
+            return False                                                 # (slow) motion, not a bias step
+        self.bias_resets.append(float(self.x[3]))
+        self.P[3, :] = 0.0
+        self.P[:, 3] = 0.0
+        self.P[3, 3] = BIAS_RESET_SD ** 2
+        self._zupt_rejected = 0
+        self._zupt_nu.clear()
+        return self.update("zupt", [omega], [self.x[3]], H, [[ZUPT_SD ** 2]])
 
     # ------------------------------------------------------------------ output
     def pose(self) -> tuple[float, float, float]:

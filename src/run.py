@@ -24,19 +24,25 @@ from experiment.core import RobotRun, load_lidar_files
 from experiment.recorder import RUNS_DIR, RunRecorder, run_name
 from mazes.maze_spec import MAZES
 from sensors.noise_models import PROFILES, NoiseProfile
+from experiment.disturbances import Disturbance, noise_label
+from experiment.disturbances import parse as parse_dist
 
 
 def build(args):
     spec = MAZES[args.maze]
     config = CONFIGS[args.config]
-    noise = NoiseProfile(args.noise, args.seed)
-    tag = "_".join(x for x in (args.dyn, "nogate" if args.no_gate else None, args.tag) if x) or None
+    scale = noise_scale(args)
+    noise = NoiseProfile(args.noise, args.seed, scale)
+    dspec = parse_dist(args.dist)
+    dist = Disturbance(dspec, args.seed, len(spec.nodes_grid))
+    tag = "_".join(x for x in (args.dyn, dspec.label if dspec else None, noise_label(scale),
+                               "nogate" if args.no_gate else None, args.tag) if x) or None
     folder = RUNS_DIR / run_name(args.maze, args.config, args.noise, args.seed, tag, args.offline)
     rec = RunRecorder(folder)
     lidar_files = load_lidar_files()
     run = RobotRun(spec, config, noise, rec, budget=args.budget, goal=not args.no_goal,
                    max_time_s=args.max_time, lidar_files=lidar_files,
-                   gating=not args.no_gate)
+                   gating=not args.no_gate, disturbance=dist)
     mount, model, cal = lidar_files
     rec.write_meta({
         "run": folder.name, "mode": "offline" if args.offline else "live",
@@ -55,9 +61,19 @@ def build(args):
         "lidar": {"mount": mount, "range_model": {"a": model.a, "b": model.b}, "extrinsic": list(run.ext),
                   "calibration_file": cal is not None},
         "dynamic": args.dyn,
+        "disturbance": dspec.describe() if dspec else None,
         "offline": {"lidar": args.offline_lidar, "turn_loss_scale": args.turn_loss} if args.offline else None,
     })
     return spec, run, rec
+
+
+def noise_scale(args) -> dict | None:
+    """N1: --noise-scale k (every sensor); N2: --noise-scale-gyro / -lidar / -prox k (one sensor)."""
+    k = {"gyro": args.noise_scale, "lidar": args.noise_scale, "proximity": args.noise_scale}
+    for name, v in (("gyro", args.noise_scale_gyro), ("lidar", args.noise_scale_lidar), ("proximity", args.noise_scale_prox)):
+        if v is not None:
+            k[name] = v
+    return None if all(v == 1.0 for v in k.values()) else k
 
 
 def report(s: dict) -> None:
@@ -102,6 +118,11 @@ def main(argv=None) -> dict:
                     help="step 14b: dynamic obstacles in the goal run")
     ap.add_argument("--no-gate", action="store_true", help="step 16 ablation: EKF accepts every measurement")
     ap.add_argument("--turn-loss", type=float, default=1.0, help="offline: scale of the live turn loss (0 = none)")
+    ap.add_argument("--dist", default=None, help="step 19 disturbance, e.g. D2=0.02, D5=0.5, D7=L (see experiment.disturbances)")
+    ap.add_argument("--noise-scale", type=float, default=1.0, help="step 19 N1: every sensor's noise sigma x k")
+    ap.add_argument("--noise-scale-gyro", type=float, default=None, help="step 19 N2: gyro noise x k")
+    ap.add_argument("--noise-scale-lidar", type=float, default=None, help="step 19 N2: LiDAR noise x k")
+    ap.add_argument("--noise-scale-prox", type=float, default=None, help="step 19 N2: proximity noise x k")
     args = ap.parse_args(argv)
 
     spec, run, rec = build(args)

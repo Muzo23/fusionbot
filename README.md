@@ -17,7 +17,7 @@ src/
                  MazeMemory, MazeDecision (DFS)                   (7–11)
   mapping/       occupancy grid, metrike karte                    (14)
   experiments/   runtime, runner, rekorder, smetnje, Monte Carlo (13, 19–20);
-                 replay estimatora + podešavanje šuma DE (15b)
+                 replay estimatora + podešavanje šuma DE (15b); smetnje D1–D7, N1–N2 (19)
 tests/           test_stepXX_*.py, jedan po koraku
 docs/            bilješke koraka (podloga za poglavlje 3 rada)
 results/         izlazi runova (nije u gitu)
