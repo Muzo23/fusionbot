@@ -44,6 +44,25 @@ def classify(turns):
     return out
 
 
+def scale_loss_fit(rows):
+    """|GT| = k * |odo| - loss_dir  (shared scale k, constant loss per turn for CCW / CW), least squares.
+    k != 1 -> scale error (B_eff); loss -> transient slip per turn (not removable by B_eff)."""
+    pts = [(abs(r[3]), abs(r[4]), 0 if r[1] > 0 else 1) for r in rows]
+    # normal equations for (k, c0, c1) with model g = k*o - c_d
+    n = [sum(1 for p in pts if p[2] == d) for d in (0, 1)]
+    so = [sum(p[0] for p in pts if p[2] == d) for d in (0, 1)]
+    sg = [sum(p[1] for p in pts if p[2] == d) for d in (0, 1)]
+    soo = sum(p[0] * p[0] for p in pts)
+    sog = sum(p[0] * p[1] for p in pts)
+    # eliminate c_d = (k*so_d - sg_d) / n_d
+    num = sog - sum(so[d] * sg[d] / n[d] for d in (0, 1) if n[d])
+    den = soo - sum(so[d] ** 2 / n[d] for d in (0, 1) if n[d])
+    k = num / den
+    c = [(k * so[d] - sg[d]) / n[d] if n[d] else 0.0 for d in (0, 1)]
+    res = [p[1] - (k * p[0] - c[p[2]]) for p in pts]
+    return k, c[0], c[1], max(abs(x) for x in res)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--alpha", type=float, default=None, help="TURN angular acceleration limit [rad/s^2]")
@@ -85,6 +104,10 @@ def main() -> None:
     print(f"current B_eff {rc.EFFECTIVE_WHEEL_SEPARATION_M:.5f} m -> scale-calibrated B_eff {b_new:.5f} m")
     print(f"remaining CW/CCW asymmetry (not removable by B): "
           f"{100 * (k_ccw - k_cw):+.3f} % of the turn angle")
+    ks, c_ccw, c_cw, rmax = scale_loss_fit(rows)
+    print(f"\nmodel |GT| = k*|odo| - loss : k {ks:.5f} (scale -> B_eff {rc.EFFECTIVE_WHEEL_SEPARATION_M / ks:.5f} m), "
+          f"loss per turn CCW {c_ccw:+.3f} deg, CW {c_cw:+.3f} deg, max residual {rmax:.3f} deg")
+    print("  (B_eff used since 8. 10. 2026 = scale part only; the constant loss is left to the fusion)")
     sum_gt = {n: sum(r[4] for r in rows if r[0] == n) for n in RUNS}
     print("net GT heading per run (ideal 0): " + ", ".join(f"{n} {v:+.3f} deg" for n, v in sum_gt.items()))
 

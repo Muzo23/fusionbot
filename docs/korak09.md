@@ -92,3 +92,31 @@ Pravilo lijeve ruke kroz cijeli T1 (44 događaja, ≈ 8 min simuliranog vremena)
 - bez kolizije;
 - |okidač − očekivano| < 10 mm;
 - razmak tijela > 5 mm.
+
+### Live rezultat (5. 10. 2026) – PASS
+
+| mjera | vrijednost |
+|---|---|
+| događaji | 44 / 44 se poklapaju s obilaskom, zatim FINISH na ROOT-u |
+| zatvorena raskrižja | 24; okidač − očekivano: +0.2 … +2.4 mm (zaštita 15 mm) |
+| najmanji razmak tijela od zida (GT) | 12.4 mm (offline 20.9 mm) |
+| kolizija | nema |
+| vrijeme | 526 s simulirano / 280 s stvarno |
+
+**Razmak po stanjima.** Najmanji razmak je u okretima (TURN:TURNING), konkretno u polukružnim
+okretima u slijepim ulicama I, START, H i F: 12.4–13.5 mm. Nominalno je razmak pri polukružnom okretu
+22 mm (polovica širine hodnika 0.364 m minus radijus okretanja 0.342 m). Live robot pri okretu klizne
+oko 10 mm (pomak osi iz koraka 7), pa je 12.4 mm očekivano. U vožnji ravno razmak je ≥ 49 mm.
+
+**Drift smjera odometrije (konfiguracija A).** Na kraju obilaska odometrija − GT = +11.2°. Drift raste
+jednoliko, ≈ +1° na 50 s:
+
+| t [s] | 51 | 101 | 151 | 201 | 251 | 301 | 351 | 401 | 451 | 501 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| drift [°] | 1.0 | 1.7 | 2.5 | 4.2 | 6.5 | 5.1 | 5.8 | 7.3 | 8.1 | 9.4 |
+
+Fizički robot cijelo vrijeme ostaje poravnat s hodnicima, jer ga vođenje drži uz zidove. Procjena
+smjera iz odometrije pak odlazi, zbog gubitka od ≈ 0.6° po okretu (korak 7). Karta i položaji
+raskrižja procijenjeni samo iz odometrije bit će zato zakrenuti do ≈ 11°. To je izravna motivacija za
+fuziju (C: žiroskop, D/E: LiDAR, B: PROX-LOC) i ulaz za korak 10: prepoznavanje već posjećenog
+raskrižja prema procijenjenoj pozi mora biti otporno na takav drift.

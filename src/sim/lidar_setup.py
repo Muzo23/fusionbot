@@ -12,7 +12,8 @@ robot and installs the FusionBot scan script. Simulation must be STOPPED.
 What --apply does
 -----------------
 1. finds the Hokuyo model (the object whose children are sensor1 / sensor2) and
-   makes it a child of /FusionBot (like the proximity sensors);
+   makes it a child of the moving body /FusionBot/mainBase_phy (like the proximity sensors;
+   /FusionBot itself is the static model base and does NOT move in the simulation);
 2. turns it so that the centre of its 240 deg field of view points along the
    robot heading, and moves it so that the scan centre lies above the wheel-axle
    midpoint and the SCAN PLANE is at --height (default: 0.03 m above the top of
@@ -50,6 +51,10 @@ WALL_TOP_ABOVE_FLOOR_M = 0.30
 SCRIPT_ALIAS = "FusionBotLidarScan"
 XYZD_PROPERTY = "signal.fusionbotLidarXYZD"
 COUNT_PROPERTY = "signal.fusionbotLidarScanCount"
+# The two Hokuyo vision sensors are rendered only every SCAN_DIVIDER-th step (10 Hz, as the real
+# URG-04LX), not every 10 ms step: rendering is the most expensive part of a simulation step
+# (step 13b-7, goal: simulation as close to real time as possible).
+SCAN_DIVIDER = 10
 RESULTS = Path(__file__).resolve().parents[2] / "results"
 
 LIDAR_SCRIPT = f"""sim=require'sim'
@@ -57,6 +62,7 @@ LIDAR_SCRIPT = f"""sim=require'sim'
 local MAX_RANGE={MAX_RANGE_M}
 local XYZD_PROPERTY='{XYZD_PROPERTY}'
 local COUNT_PROPERTY='{COUNT_PROPERTY}'
+local SCAN_DIVIDER={SCAN_DIVIDER}     -- render + publish a scan every SCAN_DIVIDER-th step (10 Hz)
 
 function sysCall_init()
     self=sim.getObject('..')
@@ -69,10 +75,25 @@ function sysCall_init()
         sim.setObjectInt32Param(visionSensors[i],sim.visionintparam_entity_to_render,collection)
         sim.setObjectFloatParam(visionSensors[i],sim.visionfloatparam_far_clipping,MAX_RANGE)
     end
+    for i=1,2 do
+        sim.setExplicitHandling(visionSensors[i],1)                 -- rendered only when we ask
+    end
     scanCount=0
+    stepCount=0
+end
+
+function sysCall_cleanup()
+    for i=1,2 do
+        sim.setExplicitHandling(visionSensors[i],0)
+    end
 end
 
 function sysCall_sensing()
+    stepCount=stepCount+1
+    if (stepCount-1)%SCAN_DIVIDER~=0 then return end
+    for i=1,2 do
+        sim.handleVisionSensor(visionSensors[i])
+    end
     local data={{}}
     local invBase=sim.getMatrixInverse(sim.getObjectMatrix(self))
     for i=1,2 do
@@ -100,6 +121,15 @@ end
 
 def _type(sim, name):
     return getattr(sim, name, None)
+
+
+def _first_type(sim, *names):
+    """First defined constant (0 is a valid value, so no `or`)."""
+    for n in names:
+        v = getattr(sim, n, None)
+        if v is not None:
+            return v
+    return None
 
 
 def _children(sim, h):
@@ -158,6 +188,21 @@ def scan_geometry(sim, hok):
     fwd = [z1[i] + z2[i] for i in range(3)]
     tilt = max(abs(z1[2]), abs(z2[2]))
     return centre, math.atan2(fwd[1], fwd[0]), tilt, (s1, s2)
+
+
+def scan_frame_in_base(m, centre, fwd_yaw) -> dict:
+    """The scan frame (origin = scan centre, x = scan forward, horizontal; z = up) expressed in the
+    Hokuyo base frame, in which FusionBotLidarScan publishes the points. The runner turns every
+    point p_b into  p_s = R (p_b - c)  ->  bearing atan2(y_s, x_s), range hypot(x_s, y_s)
+    without needing the Hokuyo matrix at run time (step 13b-2)."""
+    R = [[m[0], m[1], m[2]], [m[4], m[5], m[6]], [m[8], m[9], m[10]]]      # base -> world rotation
+    t = (m[3], m[7], m[11])
+    d = [centre[i] - t[i] for i in range(3)]
+    c_b = [sum(R[r][j] * d[r] for r in range(3)) for j in range(3)]      # R^T (c_w - t)
+    axes = [(math.cos(fwd_yaw), math.sin(fwd_yaw), 0.0), (-math.sin(fwd_yaw), math.cos(fwd_yaw), 0.0),
+            (0.0, 0.0, 1.0)]
+    R_sb = [[sum(a[r] * R[r][j] for r in range(3)) for j in range(3)] for a in axes]
+    return {"scan_centre_in_base": c_b, "scan_rotation_from_base": R_sb}
 
 
 def robot_top_z(sim, robot, exclude: set[int]) -> float:
@@ -250,7 +295,26 @@ def main() -> None:
                 print(f"  {alias:28} {f_:+.4f} {l_:+.4f} {w[2] - floor_z:.4f} m   size {dx:.3f} x {dy:.3f} x {dz:.3f} m")
             if not args.onto:
                 return
-        if args.onto == "auto":
+        part = None
+        if args.onto in ("auto", "lidar", "lidar_phy") and not any(b[0] == "lidar_phy" for b in boxes):
+            from sim.robot_parts import find_part     # housing merged into a grouped shape
+            try:
+                part = find_part(sim, robot, "lidar", floor_z, hok_tree)
+            except RuntimeError as exc:
+                print(f"({exc})")
+        rec = RESULTS / "lidar_mount.json"
+        if part is None and args.onto in ("lidar", "lidar_phy") and rec.exists() \
+                and not any(b[0] == "lidar_phy" for b in boxes):
+            # housing merged beyond recognition: use the housing axis recorded by the last successful setup
+            m = json.loads(rec.read_text())
+            fx, ly = m["x_forward_m"], m["y_left_m"]
+            wx = axle[0] + fx * c0 - ly * s0
+            wy = axle[1] + fx * s0 + ly * c0
+            print(f"(using the recorded housing axis from {rec.name}: {fx:+.4f} m ahead, {ly:+.4f} m left)")
+            target = ("lidar_phy (recorded axis)", None, [wx, wy, floor_z + m["z_above_floor_m"]], (0.075, 0.075, 0.045))
+        elif part is not None:
+            target = (f"{part.label} ({part.method})", None, list(part.centre), part.size)
+        elif args.onto == "auto":
             cands = round_candidates(boxes, floor_z, axle, heading)
             if len(cands) != 1:
                 names = ", ".join(c[0] for c in cands) or "none"
@@ -258,7 +322,8 @@ def main() -> None:
                                  f"and pass --onto <alias> (click the cylinder in CoppeliaSim to see its name)")
             target = cands[0]
         else:
-            hits = [b for b in boxes if b[0] == args.onto]
+            want = "lidar_phy" if args.onto == "lidar" else args.onto
+            hits = [b for b in boxes if b[0] == want]
             if len(hits) != 1:
                 raise SystemExit(f"robot shape '{args.onto}' not found ({len(hits)} matches); see --list-shapes")
             target = hits[0]
@@ -302,7 +367,7 @@ def main() -> None:
     else:
         print(f"PLAN: scan centre {args.forward:+.3f} m ahead of the axle, plane {plane:.3f} m above floor "
               f"(wall top {WALL_TOP_ABOVE_FLOOR_M:.2f} m), forward = robot heading")
-    script_t0 = _type(sim, "sceneobject_script") or _type(sim, "object_script_type")
+    script_t0 = _first_type(sim, "sceneobject_script", "object_script_type")
     for h in sorted(hok_tree):
         if script_t0 is not None and sim.getObjectType(h) == script_t0:
             where = "main (will be replaced)" if sim.getObjectParent(h) == hok else "sensor filter (kept)"
@@ -316,8 +381,9 @@ def main() -> None:
         return
 
     # 1. parent
-    if sim.getObjectParent(hok) != robot:
-        sim.setObjectParent(hok, robot, True)
+    base = int(sim.getObject(rc.BASE_PATH))          # the dynamic body - children move with the robot
+    if sim.getObjectParent(hok) != base:
+        sim.setObjectParent(hok, base, True)
     # 2. rotate about the world z axis through the scan centre, then translate
     dyaw = math.remainder(heading - fwd_yaw, 2 * math.pi)
     m = _matrix(sim, hok)
@@ -333,7 +399,7 @@ def main() -> None:
         p = _pos(sim, hok)
         sim.setObjectPosition(hok, [p[i] + target[i] - centre[i] for i in range(3)], sim.handle_world)
     # 3. static, not respondable
-    shape_t = _type(sim, "sceneobject_shape") or _type(sim, "object_shape_type")
+    shape_t = _first_type(sim, "sceneobject_shape", "object_shape_type")
     n_shapes = 0
     for h in hok_tree:
         if sim.getObjectType(h) == shape_t:
@@ -341,7 +407,7 @@ def main() -> None:
             sim.setObjectInt32Param(h, sim.shapeintparam_respondable, 0)
             n_shapes += 1
     # 4. script
-    script_t = _type(sim, "sceneobject_script") or _type(sim, "object_script_type")
+    script_t = _first_type(sim, "sceneobject_script", "object_script_type")
     direct = {int(h) for h in _children(sim, hok)}
     kept = sum(1 for h in hok_tree if h != hok and h not in direct
                and script_t is not None and sim.getObjectType(h) == script_t)   # count BEFORE removing
@@ -355,17 +421,31 @@ def main() -> None:
             pass
     sh = int(sim.createScript(sim.scripttype_simulation, LIDAR_SCRIPT, 0, "lua"))
     sim.setObjectAlias(sh, SCRIPT_ALIAS)
-    sim.setObjectParent(sh, hok, True)
+    first = False                                     # run before the bridge, so its packet has this step's scan
+    for setter in (
+        lambda: sim.setObjectInt32Param(sh, sim.scriptintparam_execpriority, sim.scriptexecorder_first),
+        lambda: sim.setIntProperty(sh, "executionPriority", sim.scriptexecorder_first),
+        lambda: sim.setIntProperty(sh, "execPriority", sim.scriptexecorder_first),
+    ):
+        try:
+            setter()
+            first = True
+            break
+        except Exception:                              # noqa: BLE001
+            continue
+    sim.setObjectParent(sh, hok, False)             # script icon sits on the LiDAR (local pose 0)
     # 5. verify and record
     centre, fwd_yaw, tilt, _ = scan_geometry(sim, hok)
     dx, dy = centre[0] - axle[0], centre[1] - axle[1]
     c, s = math.cos(heading), math.sin(heading)
     mount = {
-        "hokuyo_path": f"{rc.ROBOT_PATH}/{_alias(sim, hok)}",
+        "hokuyo_path": f"{rc.BASE_PATH}/{_alias(sim, hok)}",
         "x_forward_m": dx * c + dy * s, "y_left_m": -dx * s + dy * c,
         "z_above_floor_m": centre[2] - floor_z,
         "yaw_offset_rad": math.remainder(fwd_yaw - heading, 2 * math.pi),
         "max_range_m": MAX_RANGE_M, "xyzd_property": XYZD_PROPERTY, "count_property": COUNT_PROPERTY,
+        "runs_first": first, "scan_divider": SCAN_DIVIDER,
+        **scan_frame_in_base(_matrix(sim, hok), centre, fwd_yaw),
     }
     RESULTS.mkdir(parents=True, exist_ok=True)
     (RESULTS / "lidar_mount.json").write_text(json.dumps(mount, indent=1))

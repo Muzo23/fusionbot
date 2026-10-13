@@ -118,6 +118,7 @@ class Edge:
     b: int | None = None
     dir_b: Dir | None = None
     traversals: int = 0
+    blocked: bool = False              # step 14b: found blocked by a permanent obstacle (not used by planning)
 
     def other(self, node: int) -> tuple[int | None, Dir | None]:
         return (self.b, self.dir_b) if node == self.a else (self.a, self.dir_a)
@@ -149,6 +150,7 @@ class MazeMemory:
         self.edges: dict[int, Edge] = {}
         self.current: int | None = None
         self._pending: int | None = None            # edge being traversed
+        self._returning: tuple[int, Dir, int] | None = None   # 14b: (junction, its exit, edge) after a U-turn mid-edge
         self.log: list[Arrival] = []
 
     # ------------------------------------------------------------ start
@@ -160,6 +162,7 @@ class MazeMemory:
         self.edges = {}
         self.current = 0
         self._pending = None
+        self._returning = None
         self.log = []
         self.depart(h)
         return 0
@@ -175,6 +178,21 @@ class MazeMemory:
         exits = frozenset(relative_exits(obs, heading).values())
         cx, cy = self.centre_estimate(obs, x, y, theta)
         arrival_exit = opposite(heading)
+
+        if self._returning is not None:
+            # turned back in the middle of an edge (step 14b): the robot arrives again at the junction it
+            # left, through the exit it left by
+            jid, d, eid = self._returning
+            self._returning = None
+            j = self.junctions[jid]
+            dd = math.hypot(j.x - cx, j.y - cy)
+            inconsistent = (j.exits != exits) or d != arrival_exit
+            j.visits += 1
+            self.current = j.id
+            arr = Arrival(j.id, False, heading, arrival_exit, exits, (cx, cy), dd, (), eid, False,
+                          "RETURN", inconsistent)
+            self.log.append(arr)
+            return arr
 
         if self.edge_association and self._pending is not None:
             e = self.edges[self._pending]
@@ -258,6 +276,18 @@ class MazeMemory:
         self._pending = eid
         return eid
 
+    def turn_back(self, *, blocked: bool = True) -> int | None:
+        """Step 14b: the robot turns back in the middle of the edge it is traversing (permanent
+        obstacle). The edge is marked blocked and the next arrival is the junction it came from."""
+        if self._pending is None or self.current is None:
+            return None
+        e = self.edges[self._pending]
+        e.blocked = e.blocked or blocked
+        d = e.dir_a if e.a == self.current else e.dir_b
+        self._returning = (self.current, d, e.id)
+        self._pending = None
+        return e.id
+
     # ------------------------------------------------------------ queries
     def unexplored_exits(self, jid: int) -> list[Dir]:
         j = self.junctions[jid]
@@ -279,6 +309,7 @@ class MazeMemory:
             "structure_rejections": sum(bool(a.rejected_structure) for a in self.log),
             "edge_associations": sum(a.association == "EDGE" for a in self.log),
             "inconsistent_edge_associations": sum(a.inconsistent for a in self.log),
+            "blocked_edges": sum(e.blocked for e in self.edges.values()),
         }
 
 

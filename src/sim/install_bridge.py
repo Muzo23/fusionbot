@@ -114,7 +114,7 @@ def main() -> None:
     )
 
     print()
-    print("FusionBot bridge installer, protocol 2.0, mode = " + ("LOCKSTEP" if lockstep else "REALTIME"))
+    print("FusionBot bridge installer, protocol 2.2 (IMU + LiDAR + dynamic obstacles), mode = " + ("LOCKSTEP" if lockstep else "REALTIME"))
     print("------------------------------------")
     print(f"simulation dt                 : {sim_dt:.6f} s")
     print(f"dynamics dt                   : {dyn_dt:.6f} s")

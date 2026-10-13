@@ -68,6 +68,10 @@ local EVALUATION_DIVIDER = 1
 local LOCKSTEP = __LOCKSTEP__
 local LOCKSTEP_RECV_TIMEOUT_MS = 20
 local LOCKSTEP_MAX_WAIT_S = 10.0
+-- extension 2.1: IMU every step, every NEW LiDAR scan once (the scan script renders at 10 Hz)
+local IMU_PATH = __IMU_PATH__
+local LIDAR_PATH = __LIDAR_PATH__
+local LIDAR_DIVIDER = 10
 local lastStatePayload = nil
 local lockstepRepublishCount = 0
 local lockstepReleased = false
@@ -107,6 +111,7 @@ local commandSub = nil
 
 local stateSequence = 0
 local sensingCount = 0
+local lastAttachedLidarCount = 0
 local evaluationSequence = 0
 
 local appliedCommandSequence = 0
@@ -379,6 +384,27 @@ local function updateEvaluation()
     if rl ~= nil then rightLaggedCommand = rl end
 end
 
+-- extension 2.2 (step 14b): optional obstacle poses appended to the command packet
+--   [6] n, then n x (index, x, y, z): FB_MAZE_dyn_<index> moved to (x, y, z) in the world frame
+local dynHandles = {}
+
+local function applyObstacles(values)
+    if values == nil or #values < 6 then
+        return
+    end
+    local n = math.floor(values[6] + 0.5)
+    for i = 0, n - 1 do
+        local b = 7 + 4 * i
+        if #values < b + 3 then
+            return
+        end
+        local h = dynHandles[math.floor(values[b] + 0.5)]
+        if h ~= nil and h ~= -1 then
+            sim.setObjectPosition(h, {values[b + 1], values[b + 2], values[b + 3]}, sim.handle_world)
+        end
+    end
+end
+
 local function readLatestCommand()
     -- Drain all queued command messages. Only the newest command is applied.
     while true do
@@ -400,6 +426,7 @@ local function readLatestCommand()
                     math.floor(values[3] + 0.5)
                 appliedLeftCommand = clamp(values[4], -1.0, 1.0)
                 appliedRightCommand = clamp(values[5], -1.0, 1.0)
+                applyObstacles(values)
             end
         end
     end
@@ -500,6 +527,43 @@ local function publishState()
     table.insert(state, gtYawRate)
     table.insert(state, lockstepRepublishCount)
 
+    -- extension 2.1
+    table.insert(state, 1.0)
+    local imuOk = false
+    if imuHandle ~= -1 then
+        local c = sim.getIntProperty(imuHandle, 'signal.fusionbotImuCount', {noError = true})
+        local g = sim.getFloatArrayProperty(imuHandle, 'signal.fusionbotImuGyro', {noError = true})
+        local a = sim.getFloatArrayProperty(imuHandle, 'signal.fusionbotImuAccel', {noError = true})
+        if c ~= nil and g ~= nil and a ~= nil and #g == 3 and #a == 3 then
+            table.insert(state, c)
+            for k = 1, 3 do table.insert(state, g[k]) end
+            for k = 1, 3 do table.insert(state, a[k]) end
+            imuOk = true
+        end
+    end
+    if not imuOk then
+        table.insert(state, -1.0)
+        for k = 1, 6 do table.insert(state, 0.0) end
+    end
+    local scan = nil
+    local lidarCount = -1
+    if lidarHandle ~= -1 then
+        lidarCount = sim.getIntProperty(lidarHandle, 'signal.fusionbotLidarScanCount', {noError = true}) or -1
+        -- attach every NEW scan once (the LiDAR script renders at 10 Hz, step 13b-7)
+        if lidarCount > lastAttachedLidarCount then
+            scan = sim.getFloatArrayProperty(lidarHandle, 'signal.fusionbotLidarXYZD', {noError = true})
+            lastAttachedLidarCount = lidarCount
+        end
+    end
+    table.insert(state, lidarCount)
+    if scan ~= nil and #scan >= 4 then
+        local n = math.floor(#scan / 4)
+        table.insert(state, n)
+        for k = 1, 4 * n do table.insert(state, scan[k]) end
+    else
+        table.insert(state, 0.0)
+    end
+
     local payload = sim.packDoubleTable(state)
     lastStatePayload = payload
 
@@ -516,6 +580,7 @@ local function applyCommandValues(values)
     appliedSourceStateSequence = math.floor(values[3] + 0.5)
     appliedLeftCommand = clamp(values[4], -1.0, 1.0)
     appliedRightCommand = clamp(values[5], -1.0, 1.0)
+    applyObstacles(values)
 end
 
 local function waitForLockstepCommand()
@@ -570,6 +635,15 @@ function sysCall_init()
     rightJoint = sim.getObject(RIGHT_JOINT_PATH)
     base = sim.getObject(BASE_PATH)
     robot = sim.getObject(ROBOT_PATH)
+    imuHandle = sim.getObject(IMU_PATH, {noError = true})
+    lidarHandle = sim.getObject(LIDAR_PATH, {noError = true})
+    dynHandles = {}
+    for k = 0, 15 do
+        local h = sim.getObject('/FB_MAZE_dyn_' .. k, {noError = true})
+        if h ~= nil and h ~= -1 then dynHandles[k] = h end
+    end
+    if imuHandle == nil then imuHandle = -1 end
+    if lidarHandle == nil then lidarHandle = -1 end
 
     sensors = {}
     for i = 1, #SENSOR_PATHS do
@@ -622,6 +696,7 @@ function sysCall_init()
 
     stateSequence = 0
     sensingCount = 0
+    lastAttachedLidarCount = 0
     evaluationSequence = 0
 
     appliedCommandSequence = 0
@@ -795,6 +870,8 @@ end
         "__BASE_YAW_OFFSET__": f"{float(BASE_YAW_TO_PHYSICAL_HEADING_RAD):.17g}",
         "__SENSOR_PATHS__": sensor_paths_lua,
         "__LOCKSTEP__": "true" if lockstep else "false",
+        "__IMU_PATH__": _lua_string(BASE_PATH + "/FusionBotIMU"),
+        "__LIDAR_PATH__": _lua_string(BASE_PATH + "/fastHokuyo"),
     }
 
     for key, value in replacements.items():

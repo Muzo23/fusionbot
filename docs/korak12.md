@@ -174,3 +174,54 @@ i dodaje montaži. Kriteriji: ekstrinzična korekcija < 5 mm / 0.5°, svaka poza
 
 Sljedeće (13b): vremensko usklađivanje skena i odometrije u okretu te model šuma stvarnog
 URG-04LX-UG01 (±30 mm do 1 m, ±3 % iznad, 10 Hz) u Pythonu, primijenjen na kalibrirane udaljenosti.
+
+## 12e – IMU u kućištu IMU_phy (sim/imu_setup.py, checks/step12e_live_imu.py)
+
+Svi senzori konfiguracija A–E fizički su na robotu: enkoderi kotača (zglobovi), 5 senzora blizine,
+LiDAR u `lidar_phy` i IMU u `IMU_phy` (kućište kamere `cameraHousing_phy` ostaje prazno – kamera nije
+dio nijedne konfiguracije).
+
+`python -m sim.imu_setup --apply` stvara dummy `/FusionBot/FusionBotIMU` u središtu kućišta `IMU_phy`
+(osi = osi robota) i skriptu `FusionBotImuScript`, koja svaki korak (nakon koraka fizike) iz poza
+zadnja tri koraka računa **idealni** 6-osni IMU:
+
+- žiroskop: kutna brzina u okviru tijela iz R(k−1)ᵀR(k);
+- akcelerometar: specifična sila f = R(k)ᵀ(a − g) iz druge razlike položaja (u mirovanju (0, 0, +9.81)).
+
+Objavljuje `signal.fusionbotImuGyro`, `signal.fusionbotImuAccel`, `signal.fusionbotImuCount`;
+montaža u `results/imu_mount.json`. Šum i bias stvarnog MEMS IMU-a dodaju se u Pythonu (korak 13),
+kao i za LiDAR. Formule su u Pythonu zrcaljene u `imu_from_poses` i testirane (mirovanje, kružnica,
+ubrzanje naprijed).
+
+Živa provjera (misija iz koraka 7: START→ROOT pa +90/−90/+180/−180°): žiroskop z prema GT brzini
+zakretanja (< 1e-3 rad/s, bez kašnjenja), žiroskop x/y mali, akcelerometar u mirovanju 9.81,
+u vožnji prema specifičnoj sili očekivanoj iz GT putanje osi (a_x = du/dt − ω²r, a_y = uω + ω̇r).
+
+## 12f – dijelovi robota grupirani u mainBase_phy (sim/robot_parts.py)
+
+Od 8. 10. dijelovi robota (kućišta, stupići, ploča …) grupirani su u jedan oblik (`mainBase_phy`), pa
+`IMU_phy` i `lidar_phy` više nisu zasebni objekti. `find_part(sim, robot, "imu" | "lidar", floor_z)`
+pronalazi kućište: najprije kao zasebni oblik, inače **kopira** svaki oblik robota, kopiju razgrupira
+(`sim.ungroupShape`) i među komponentama traži onu poznate veličine (IMU 0.062 × 0.064 × 0.019 m,
+LiDAR 0.075 × 0.075 × 0.045 m, sortirane dimenzije, tolerancija 6 mm, visina > 0.12 m); sve kopije
+(i ono što su donijele) se brišu – robot se ne mijenja. Koriste ga `sim.imu_setup` i
+`sim.lidar_setup --onto lidar|auto`. Testovi s lažnim simulatorom: `tests/test_step12f_robot_parts.py`.
+
+Napomena: ako je grupiranje promijenilo masu ili tromost tijela, ponoviti provjeru okreta (korak 7).
+
+**Važno (8. 10.):** `/FusionBot` je statična baza modela i u simulaciji se NE giba; giba se tijelo
+`mainBase_phy`. LiDAR (`fastHokuyo`) i IMU (`FusionBotIMU`) zato moraju biti djeca `mainBase_phy`
+(kao senzori blizine) – `lidar_setup` i `imu_setup` ih tamo stavljaju. Statičke provjere i kalibracija
+LiDAR-a (12c/12d) ostaju valjane jer robot u njima stoji, a položaj LiDAR-a se ne mijenja.
+
+### Živa provjera IMU-a (8. 10., T1, misija koraka 7)
+
+- 2452 koraka, svaki ima uzorak IMU-a; skripta se izvršava prva u koraku;
+- **žiroskop z prema GT brzini zakretanja: max |razlika| 3.5e-5 rad/s, rms 1.5e-5, bez kašnjenja** (vrh 1.23 rad/s);
+- žiroskop x/y: u mirovanju ≤ 0.0007 rad/s; u vožnji tijelo se ljulja na kontaktima (rms 0.013, max 0.052 rad/s)
+  – stvarno gibanje, ravninski EKF koristi samo g_z;
+- akcelerometar u mirovanju: z = 9.8101 m/s², |xy| srednje 0.012 m/s²;
+- akcelerometar u vožnji prema GT (50 ms): rms 0.030 (x) i 0.049 m/s² (y); bočno vibracije ±0.2 m/s² u okretima
+  (kontakti MuJoCo) – još jedan razlog da akcelerometar ne ulazi u procjenu poze.
+- Prvi kriteriji „mirovanja“ bili su krivi (nulta naredba ≠ mirovanje, robot još koči; ljuljanje u vožnji
+  nije pogreška senzora) – ispravljeno; slika `docs/figures/step12e_imu_live.png`.

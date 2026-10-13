@@ -19,12 +19,12 @@ def _collect(sim, hok, n):
     scans, diag = [], []
     sim.setStepping(True)
     try:
-        for _ in range(n + 10):
+        for _ in range(10 * n + 20):
             c = sim.getIntProperty(hok, COUNT_PROPERTY, {"noError": True})
             xyzd = sim.getFloatArrayProperty(hok, XYZD_PROPERTY, {"noError": True})
             t = sim.getSimulationTime()
             diag.append((t, c, None if xyzd is None else len(xyzd)))
-            if c is not None and xyzd:
+            if c is not None and xyzd and (not scans or c != scans[-1]["count"]):   # new scans only (10 Hz)
                 centre, fwd, tilt, _ = scan_geometry(sim, hok)
                 scans.append(dict(count=c, t=t, xyzd=list(xyzd), m=list(sim.getObjectMatrix(hok, sim.handle_world)),
                                   centre=centre, fwd=fwd, tilt=tilt, axle=_axle(sim), heading=_heading(sim)))

@@ -26,12 +26,18 @@ class DrivePlant:
     J = 0.004
 
     def __init__(self, x=0.0, y=0.0, th=0.0, track=rc.EFFECTIVE_WHEEL_SEPARATION_M,
-                 yaw_inertia=0.0, yaw_friction=0.0, turn_slip=0.0):
+                 yaw_inertia=0.0, yaw_friction=0.0, turn_slip=0.0, turn_deficit=None):
         self.x, self.y, self.th, self.track = x, y, th, track
         self.jy, self.fy = float(yaw_inertia), float(yaw_friction)
         # turn_slip: in in-place rotation the BODY turns (1 - turn_slip) of what the
         # wheels (encoders) say; live step 7: ~0.6 deg per 90 deg -> 0.0067
         self.turn_slip = float(turn_slip)
+        # turn_deficit=(ccw_rad, cw_rad): every in-place rotation the BODY loses a
+        # FIXED angle w.r.t. the encoders, independent of the turn angle (live:
+        # 68 turns in the step-11 T1/T2/T3 runs, CCW 0.47 deg, CW 0.66 deg)
+        self.turn_deficit = turn_deficit
+        self._deficit_left = 0.0
+        self._rotating = False
         self.ml, self.mr = MotorModel(), MotorModel()
         self.wl = self.wr = self.ql = self.qr = 0.0
         self.el, self.er = IncrementalEncoder(), IncrementalEncoder()
@@ -79,6 +85,15 @@ class DrivePlant:
             w = rc.WHEEL_RADIUS_M * (self.wr - self.wl) / self.track
             if self.turn_slip and abs(v) < 0.02:
                 w *= 1.0 - self.turn_slip
+            if self.turn_deficit is not None:
+                in_place = abs(v) < 0.02 and abs(w) > 0.05
+                if in_place and not self._rotating:
+                    self._deficit_left = self.turn_deficit[0 if w > 0 else 1]
+                self._rotating = in_place or (self._rotating and abs(w) > 0.005)
+                if self._deficit_left > 0.0 and abs(w) > 0.0:
+                    cut = min(self._deficit_left, 0.05 * abs(w) * h)   # spread over ~0.2 s
+                    self._deficit_left -= cut
+                    w -= math.copysign(cut / h, w)
             self.x += v * math.cos(self.th + w * h / 2) * h
             self.y += v * math.sin(self.th + w * h / 2) * h
             self.th += w * h

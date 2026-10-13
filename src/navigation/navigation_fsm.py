@@ -28,9 +28,9 @@ POSITION (for LEFT / RIGHT / UTURN):
              straight CLOSED: drive until FRONT_BLOCKED; guard = (FRONT distance at
                               the reference - FRONT_BLOCKED) + 15 mm, reached first ->
                               abort "closed_straight_guard"; trigger distance logged
-    BRAKE    20 ticks with zero encoder counts on both wheels
+    BRAKE    at rest: 20 ticks with |counts| <= 1 and net <= 1 per wheel (13b-8), or 3 s timeout
     HOLD     0.5 s
-TURN: MotionController TURN (odometry), then 20 zero-count ticks; the corridor
+TURN: MotionController TURN (odometry), then at rest (same test as BRAKE); the corridor
 axis of the guidance is advanced by the turn angle.
 EXIT: straight with guidance (HOLD on the axis) and FROZEN opening semantics
 until LEFT && RIGHT detected for 5 ticks; then reset_openings() and re-process
@@ -51,6 +51,7 @@ must honour `reset_wheel_pi` on the same tick.
 from __future__ import annotations
 
 import math
+from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 
@@ -71,6 +72,7 @@ class NavState(str, Enum):
     POSITION = "POSITION"
     TURN = "TURN"
     EXIT = "EXIT"
+    BLOCKED = "BLOCKED"                  # step 14b: stopped for an obstacle that is not in the map
     FINISHED = "FINISHED"
     SAFETY_ABORT = "SAFETY_ABORT"
 
@@ -81,6 +83,7 @@ class Phase(str, Enum):
     HOLD = "HOLD"
     TURNING = "TURNING"
     SETTLE = "SETTLE"
+    WAIT = "WAIT"
 
 
 @dataclass(frozen=True)
@@ -119,6 +122,8 @@ class NavigationFSM:
         self.perception = perception or ProximityPerception()
         self.motion = motion or MotionController()
         self.guidance = guidance or CorridorGuidance()
+        self.stop_timeouts = 0                   # stops ended by STOP_TIMEOUT_S (diagnostics)
+        self.obstacle_stops = self.obstacle_resumes = self.obstacle_turnbacks = 0   # step 14b
         self.speed = float(speed_m_s)
         self.uturn_deg = float(uturn_deg)
         self.reset()
@@ -135,9 +140,16 @@ class NavigationFSM:
         self.stop_guard: str | None = None
         self._sem: PerceptionSnapshot | None = None
         self._zero = self._reacq = 0
+        self._still_win: deque = deque(maxlen=cfg.STOP_ZERO_COUNT_SAMPLES)
+        self._stop_s = 0.0
         self._hold_s = 0.0
         self._pi_reset = True
         self._closed_trigger: float | None = None
+        self._front_hist: deque = deque(maxlen=cfg.FRONT_REF_WINDOW)
+        self._last_odo_s: float | None = None
+        self._obst_n = 0
+        self._blocked_s = self._clear_s = 0.0
+        self._resume_state: NavState | None = None
 
     def _abort(self, reason: str) -> None:
         self.motion.stop()
@@ -152,6 +164,80 @@ class NavigationFSM:
         self.motion.stop()
         self._pi_reset = True
         self.phase, self.stop_guard, self._zero = Phase.BRAKE, guard, 0
+        self._still_win.clear()
+        self._stop_s = 0.0
+
+    def _stopped(self, left_counts: int, right_counts: int, dt_s: float) -> bool:
+        """Robot at rest (BRAKE / SETTLE), step 13b-8.
+
+        At rest a wheel may sit on a count edge and chatter +-1 count per tick (PI command inside
+        the motor deadzone, encoder noise), so 'N ticks with exactly zero counts' can never come.
+        At rest = over the last STOP_ZERO_COUNT_SAMPLES ticks every |count| <= 1 AND the net sum
+        per wheel |sum| <= 1 (no creep). Fallback: STOP_TIMEOUT_S after the stop began."""
+        self._still_win.append((int(left_counts), int(right_counts)))
+        self._stop_s += dt_s
+        w = self._still_win
+        if len(w) == w.maxlen:
+            small = all(abs(a) <= cfg.STOP_COUNT_TOL and abs(b) <= cfg.STOP_COUNT_TOL for a, b in w)
+            if small and abs(sum(a for a, _ in w)) <= cfg.STOP_COUNT_TOL \
+                    and abs(sum(b for _, b in w)) <= cfg.STOP_COUNT_TOL:
+                return True
+        if self._stop_s >= cfg.STOP_TIMEOUT_S - 1e-9:
+            self.stop_timeouts += 1
+            return True
+        return False
+
+    # ------------------------------------------------------------ step 14b: obstacles
+    def _front_vs_map(self, raw: ProximitySnapshot, odo_s: float):
+        """(FRONT reading, lower bound the map allows) - (None, None) when the provider has no expectation."""
+        fn = getattr(self.provider, "front_expected_min", None)
+        e = fn(odo_s) if fn is not None else None
+        if e is None:
+            return None, None
+        f = raw.front
+        return (float(f.distance_m) if f.detected and f.distance_m is not None else None), e
+
+    def _obstacle_ahead(self, raw: ProximitySnapshot, odo_s: float) -> bool:
+        d, e = self._front_vs_map(raw, odo_s)
+        hit = d is not None and d <= cfg.OBSTACLE_STOP_M and d < e - cfg.OBSTACLE_MARGIN_M
+        self._obst_n = self._obst_n + 1 if hit else 0
+        return self._obst_n >= cfg.OBSTACLE_CONFIRM_SAMPLES
+
+    def _enter_blocked(self, st: NavState) -> None:
+        self.motion.stop()
+        self._pi_reset = True
+        self._resume_state = st
+        self.state, self.phase = NavState.BLOCKED, Phase.BRAKE
+        self._still_win.clear()
+        self._stop_s = self._blocked_s = self._clear_s = 0.0
+        self._obst_n = 0
+        self.obstacle_stops += 1
+
+    def _blocked_tick(self, raw, odo_s, left_counts, right_counts, dt_s) -> None:
+        self._blocked_s += dt_s
+        if self.phase is Phase.BRAKE:
+            if self._stopped(left_counts, right_counts, dt_s):
+                self.phase = Phase.WAIT
+            return
+        d, e = self._front_vs_map(raw, odo_s)
+        clear = d is None or e is None or d > cfg.OBSTACLE_STOP_M + cfg.OBSTACLE_HYST_M \
+            or d >= e - cfg.OBSTACLE_MARGIN_M
+        self._clear_s = self._clear_s + dt_s if clear else 0.0
+        if self._clear_s >= cfg.OBSTACLE_CLEAR_S - 1e-9:
+            self.obstacle_resumes += 1
+            self.state, self.phase = self._resume_state or NavState.FOLLOW, None
+            self._front_hist.clear()
+            self._straight()
+        elif self._blocked_s >= cfg.OBSTACLE_WAIT_MAX_S - 1e-9:
+            fn = getattr(self.provider, "on_blocked", None)
+            dec = fn(odo_s) if fn is not None else ManeuverDecision.UTURN
+            if dec is ManeuverDecision.FINISH:
+                self.motion.stop()
+                self.state, self.phase = NavState.FINISHED, None
+            else:
+                self.obstacle_turnbacks += 1
+                self.decision, self.observation, self.stop_guard = ManeuverDecision.UTURN, None, "OBSTACLE"
+                self.state, self.phase, self._hold_s = NavState.POSITION, Phase.HOLD, 0.0
 
     def _turn_angle_deg(self) -> float:
         if self.decision is ManeuverDecision.UTURN:
@@ -159,6 +245,17 @@ class NavigationFSM:
         return TURN_ANGLE_DEG[self.decision]
 
     # ------------------------------------------------------------ events
+    def _front_at_reference(self, sem: PerceptionSnapshot, odo_s: float):
+        """Median of the recent FRONT readings moved to the reference (see FRONT_REF_WINDOW)."""
+        if sem.front_distance_m is None:
+            return None
+        vals = [d - (odo_s - s) for s, d in self._front_hist if odo_s - s <= cfg.FRONT_REF_MAX_TRAVEL_M]
+        if not vals:
+            return sem.front_distance_m
+        vals.sort()
+        n = len(vals)
+        return vals[n // 2] if n % 2 else 0.5 * (vals[n // 2 - 1] + vals[n // 2])
+
     def _observe(self, sem: PerceptionSnapshot, kind: ReferenceKind, odo_s: float):
         side = kind is ReferenceKind.SIDE_CONFIRMED
         obs = JunctionObservation(
@@ -166,10 +263,11 @@ class NavigationFSM:
             left_available=side and sem.left_open,
             straight_available=side and not sem.front_detected,
             right_available=side and sem.right_open,
-            front_distance_m=sem.front_distance_m,
+            front_distance_m=self._front_at_reference(sem, odo_s),
             reference_odom_distance_m=odo_s,
         )
         self.observation = obs
+        self._front_hist.clear()
         if kind is ReferenceKind.DEAD_END:
             self.motion.stop()
             self._pi_reset = True
@@ -191,6 +289,8 @@ class NavigationFSM:
             self.state, self.stop_guard, self._closed_trigger = NavState.POSITION, None, None
             if kind is ReferenceKind.DEAD_END:
                 self.phase, self.stop_guard, self._zero = Phase.BRAKE, "DEAD_END", 0
+                self._still_win.clear()
+                self._stop_s = 0.0
             else:
                 self.phase = Phase.ADVANCE
         return obs, dec
@@ -209,11 +309,12 @@ class NavigationFSM:
     ) -> NavStep:
         if not (math.isfinite(odo_distance_m) and math.isfinite(odo_dtheta_rad)) or dt_s <= 0:
             raise ValueError("invalid odometry input")
-        self.guidance.update_odometry(odo_dtheta_rad)
+        ds = 0.0 if self._last_odo_s is None else odo_distance_m - self._last_odo_s
+        self._last_odo_s = odo_distance_m
+        self.guidance.update_odometry(odo_dtheta_rad, ds)
         obs = dec = None
         reset_openings = False
         trigger = None
-        still = left_counts == 0 and right_counts == 0
 
         # ---- safety first
         if self.state not in (NavState.FINISHED, NavState.SAFETY_ABORT):
@@ -235,7 +336,15 @@ class NavigationFSM:
             self._sem = self.perception.update(raw)
         sem = self._sem
 
-        if st is NavState.INIT:
+        if st in (NavState.FOLLOW, NavState.APPROACH, NavState.EXIT) \
+                and self.motion.mode is MotionMode.STRAIGHT and self._obstacle_ahead(raw, odo_distance_m):
+            self._enter_blocked(st)
+            st = self.state
+
+        if st is NavState.BLOCKED:
+            self._blocked_tick(raw, odo_distance_m, left_counts, right_counts, dt_s)
+
+        elif st is NavState.INIT:
             self.perception.reset_openings()
             sem = self._sem = self.perception.update(raw)
             reset_openings = True
@@ -243,6 +352,10 @@ class NavigationFSM:
             self.state = NavState.FOLLOW
 
         elif st in (NavState.FOLLOW, NavState.APPROACH):
+            if sem.front_distance_m is not None and self.motion.mode is MotionMode.STRAIGHT:
+                self._front_hist.append((odo_distance_m, sem.front_distance_m))
+            else:
+                self._front_hist.clear()
             if (sem.left_open or sem.right_open) and not sem.any_candidate:
                 obs, dec = self._observe(sem, ReferenceKind.SIDE_CONFIRMED, odo_distance_m)
             elif sem.front_blocked:
@@ -268,8 +381,7 @@ class NavigationFSM:
                     elif ds >= cfg.D_TURN_ENTRY_M:
                         self._stop("ODOM_TARGET")
             elif self.phase is Phase.BRAKE:
-                self._zero = self._zero + 1 if still else 0
-                if self._zero >= cfg.STOP_ZERO_COUNT_SAMPLES:
+                if self._stopped(left_counts, right_counts, dt_s):
                     self.phase, self._hold_s = Phase.HOLD, 0.0
             elif self.phase is Phase.HOLD:
                 self._hold_s += dt_s
@@ -303,10 +415,10 @@ class NavigationFSM:
 
         if self.state is NavState.TURN:
             if self.phase is Phase.TURNING and ref.completed:
-                self.phase, self._zero = Phase.SETTLE, 0
+                self.phase, self._zero, self._stop_s = Phase.SETTLE, 0, 0.0
+                self._still_win.clear()
             elif self.phase is Phase.SETTLE:
-                self._zero = self._zero + 1 if still else 0
-                if self._zero >= cfg.STOP_ZERO_COUNT_SAMPLES:
+                if self._stopped(left_counts, right_counts, dt_s):
                     self.state, self.phase, self._reacq = NavState.EXIT, None, 0
                     self._straight()
                     ref = self.motion.update(0.0)

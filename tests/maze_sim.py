@@ -17,17 +17,27 @@ from navigation.motion_controller import MotionMode
 from perception.proximity_types import ProximityReading, ProximitySnapshot
 
 LIVE_YAW = dict(yaw_inertia=0.004, yaw_friction=0.0875)
-LIVE_TURN_SLIP = 0.0067            # live step 7: body turns ~0.6 deg less per 90 deg than odometry says
+LIVE_TURN_SLIP = 0.0067            # (superseded) proportional slip, 0.6 deg per 90 deg
+# in-place turns of the robot with the _phy parts grouped into mainBase_phy, live 7b with
+# B_eff 0.3352 m (8. 10. 2026, 12 turns):  |GT| = k |odo| - loss,  k 1.00263, loss CCW 0.857 deg,
+# CW 0.974 deg, max residual 0.30 deg  ->  odo - GT ~ 0.6-0.7 deg per 90 deg turn, ~0.3-0.5 per 180.
+# (Before grouping, 68 live turns of step 11: constant loss CCW 0.47, CW 0.66 deg.)
+LIVE_TURN_SCALE_SLIP = 1.0 - 1.00263          # negative: the body turns slightly MORE than the encoders say
+LIVE_TURN_DEFICIT = (math.radians(0.857), math.radians(0.974))
+LIVE_TURN_DEFICIT_UNGROUPED = (math.radians(0.47), math.radians(0.66))
 # rough robot outline (robot frame, m): front bumper, front corners, sides, rear corners
 BODY_POINTS = ((0.335, 0.0), (0.33, 0.09), (0.33, -0.09), (0.15, 0.17), (0.15, -0.17),
                (-0.10, 0.17), (-0.10, -0.17), (0.0, 0.17), (0.0, -0.17))
 
 
 class MazeSim:
-    def __init__(self, spec, yaw=LIVE_YAW, turn_slip=0.0):
+    def __init__(self, spec, yaw=LIVE_YAW, turn_slip=None, turn_deficit=None):
+        # the live scale part goes with the live loss; a plant without turn loss has no slip at all
+        if turn_slip is None:
+            turn_slip = LIVE_TURN_SCALE_SLIP if turn_deficit is not None else 0.0
         self.walls = WallMap(spec)
         x, y, th = spec.start_pose
-        self.plant = DrivePlant(x, y, th, turn_slip=turn_slip, **yaw)
+        self.plant = DrivePlant(x, y, th, turn_slip=turn_slip, turn_deficit=turn_deficit, **yaw)
         self.t = 0.0
         self.collision = False
         self.min_clearance = math.inf

@@ -53,14 +53,25 @@ CONTROL_RATE_HZ = 1.0 / SIMULATION_TIMESTEP_S
 
 WHEEL_RADIUS_M = 0.052976
 
-# Geometric axle separation (CAD).
-WHEEL_SEPARATION_M = 0.292
+# Geometric axle separation = distance between the two wheel joints in the scene
+# (checks.robot_geometry, 9. 10. 2026: joints at +-0.14507 m). The physical wheels are
+# cylinders of diameter 0.10595 m (r = 0.052975 m) and width 0.034 m; the visual wheels
+# from Fusion 360 are 0.110 m / 0.035 m and take no part in the dynamics.
+WHEEL_SEPARATION_M = 0.2901
 
 # Effective rotational separation B_eff, identified from in-place rotation
 # (0.340-0.342 m) and odometry calibration (0.3392 m). It absorbs contact,
 # slip and compliance and is used BOTH by odometry and inverse kinematics.
 # B and B_eff must never be mixed up.
-EFFECTIVE_WHEEL_SEPARATION_M = 0.3392
+# 8. 10. 2026 (step 13b-4, live 7b after grouping the _phy parts into mainBase_phy):
+# 12 turns of 90 / 180 deg fitted as  GT = k * odo - loss(direction):
+# k = 1.0119 (angle-proportional = scale -> B_eff 0.3392 / k = 0.3352 m),
+# constant loss per turn CCW 0.56 deg, CW 0.74 deg (transient wheel slip, NOT
+# a scale error - left in the odometry, it is what the fusion has to correct).
+# Verified live with 0.3352 m (7b, 8. 10.): k = 1.0026 (|k - 1| < 0.5 % -> accepted, not
+# iterated further), odo - GT 0.68 deg per 90 deg turn, 0.44 per 180 deg turn - the error no
+# longer grows with the angle.
+EFFECTIVE_WHEEL_SEPARATION_M = 0.3352
 
 # Farthest point of the visual (CAD) envelope from the axle midpoint; the
 # in-place turning radius that must fit inside a corridor.

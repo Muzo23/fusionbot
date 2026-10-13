@@ -71,6 +71,49 @@ class TestMeasurementModel(unittest.TestCase):
         self.assertIsNone(measure_corridor(snap.__class__(**{**snap.as_dict(), "front": near_front})))
 
 
+class TestSingleWall(unittest.TestCase):
+    """Step 13b-6: one side open, the other a plain wall."""
+
+    def test_single_wall_model_recovers_pose(self):
+        from navigation.corridor_guidance import measure_single_wall
+        w = CorridorWorld()
+        for side in ("left", "right"):
+            for y in (-0.03, 0.0, 0.03):
+                for a_deg in (-4, 0, 4):
+                    m = measure_single_wall(w.snapshot(1.0, y, math.radians(a_deg)), side)
+                    self.assertIsNotNone(m)
+                    self.assertLess(abs(m.y_m - y), 0.004, (side, y, a_deg, m))
+                                # linear per-sensor model: ~0.8 deg at the corner of the range (enough to stop a drift)
+                    self.assertLess(abs(math.degrees(m.alpha_rad) - a_deg), 1.0, (side, y, a_deg, m))
+
+    def test_wrong_held_axis_corrected_by_the_remaining_wall(self):
+        """4 m with the left side open and a held axis 4 deg wrong (turn losses piled up):
+        HOLD alone would steer into the right wall; the single wall keeps the robot centred."""
+        world = CorridorWorld(gaps=(("left", -1.0, 5.0),))
+        g = CorridorGuidance()
+        g.axis = math.radians(4.0)
+        tr, p, g = drive(world, dist=4.0, guidance=g)
+        self.assertIn("RIGHT", {m for *_, m, _ in tr})
+        self.assertLess(max(abs(y) for _, y, *_ in tr), 0.03)
+        self.assertLess(abs(math.degrees(tr[-1][2])), 0.5)
+        tr2, *_ = drive(world, dist=4.0, guidance=_HoldOnly())     # reference: HOLD only drifts
+        self.assertGreater(max(abs(y) for _, y, *_ in tr2), 0.10)
+
+
+class _HoldOnly(CorridorGuidance):
+    def __init__(self):
+        super().__init__()
+        self.axis = math.radians(4.0)
+
+    def command(self, snapshot):
+        from navigation import corridor_guidance as cg
+        m = cg.measure_corridor(snapshot)
+        if m is not None:
+            return super().command(snapshot)
+        err = cg.wrap(self.theta_rel - self.axis)
+        return cg.GuidanceOutput("HOLD", self._sat(-self.k * err), None, None, err)
+
+
 class TestGuidance(unittest.TestCase):
     def test_converges_from_offset_and_tilt(self):
         tr, p, _ = drive(CorridorWorld(), y0=0.05, th0=math.radians(4.0), dist=2.0)
@@ -96,7 +139,8 @@ class TestGuidance(unittest.TestCase):
         world = CorridorWorld(gaps=(("left", 1.5, 2.7), ("right", 1.5, 2.7)))
         tr, p, g = drive(world, y0=0.03, th0=math.radians(3.0), dist=3.5)
         modes = {m for *_, m, _ in tr}
-        self.assertEqual(modes, {"FULL", "HOLD"})
+        # (step 13b-6: at the gap edges one side may briefly be a plain single wall -> LEFT / RIGHT)
+        self.assertTrue({"FULL", "HOLD"} <= modes <= {"FULL", "HOLD", "LEFT", "RIGHT"}, modes)
         hold = [t for t in tr if t[3] == "HOLD"]
         # HOLD starts while the look-ahead approach is still tilting the robot;
         # after 0.2 m it must be aligned with the learnt axis and keep its offset

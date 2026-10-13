@@ -74,10 +74,10 @@ class LockstepSession:
     def __exit__(self, *exc):
         self.close()
 
-    def send(self, source_state_sequence: int, left: float, right: float) -> None:
+    def send(self, source_state_sequence: int, left: float, right: float, obstacles=None) -> None:
         self.command_sequence += 1
         payload = encode_command(
-            self.command_sequence, source_state_sequence, left, right
+            self.command_sequence, source_state_sequence, left, right, obstacles
         )
         self._last_payload = payload
         self.command_pub.send(payload)

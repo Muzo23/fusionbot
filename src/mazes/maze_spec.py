@@ -78,3 +78,16 @@ MAZES: dict[str, MazeSpec] = {
         "R", "F", 1,
     ),
 }
+
+
+def _register_real_mazes() -> None:
+    """M1..M7: real micromouse mazes (data/mazes, converted by mazes.micromouse)."""
+    from mazes.micromouse import REAL_MAZES, real_maze
+    for mid in REAL_MAZES:
+        try:
+            MAZES[mid] = real_maze(mid)
+        except FileNotFoundError:          # data folder not shipped
+            pass
+
+
+_register_real_mazes()

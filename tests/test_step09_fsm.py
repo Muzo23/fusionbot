@@ -95,6 +95,37 @@ class TestTransitions(unittest.TestCase):
         self.assertGreater(st.omega_ref_rad_s, 0.0)               # LEFT = CCW
         self.assertAlmostEqual(fsm.guidance.axis - axis0, math.pi / 2)
 
+    def _braking(self):
+        fsm = NavigationFSM(Scripted(ManeuverDecision.UTURN))
+        tick(fsm, snap())
+        self.assertIs(tick(fsm, snap(front=0.05)).phase, Phase.BRAKE)
+        return fsm
+
+    def test_rest_with_one_count_chatter(self):
+        """13b-8: a wheel on a count edge chatters +1/-1 at rest -> still at rest after 20 ticks."""
+        fsm = self._braking()
+        for i in range(cfg.STOP_ZERO_COUNT_SAMPLES):
+            st = tick(fsm, snap(front=0.04), ds=0, counts=(1 if i % 2 else -1, 0))
+        self.assertIs(st.phase, Phase.HOLD)
+        self.assertEqual(fsm.stop_timeouts, 0)
+
+    def test_creep_is_not_rest_until_timeout(self):
+        """-1 count every tick = slow creep (net -20 per window): not at rest; the timeout ends it."""
+        fsm = self._braking()
+        n = int(round(cfg.STOP_TIMEOUT_S / 0.01))
+        for _ in range(n - 1):
+            st = tick(fsm, snap(front=0.04), ds=0, counts=(-1, 0))
+        self.assertIs(st.phase, Phase.BRAKE)
+        st = tick(fsm, snap(front=0.04), ds=0, counts=(-1, 0))
+        self.assertIs(st.phase, Phase.HOLD)
+        self.assertEqual(fsm.stop_timeouts, 1)
+
+    def test_two_counts_per_tick_is_motion(self):
+        fsm = self._braking()
+        for i in range(cfg.STOP_ZERO_COUNT_SAMPLES * 2):
+            st = tick(fsm, snap(front=0.04), ds=0, counts=(2 if i % 2 else -2, 0))
+        self.assertIs(st.phase, Phase.BRAKE)
+
     def test_dead_end_stops_immediately(self):
         fsm = NavigationFSM(Scripted(ManeuverDecision.UTURN))
         tick(fsm, snap())

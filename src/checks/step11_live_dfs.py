@@ -1,5 +1,6 @@
 """
-Step 11 LIVE check: autonomous DFS exploration (configuration A), T1 / T2 / T3.
+Step 11 LIVE check: autonomous DFS exploration (configuration A), then (step 13d) the goal run:
+after the exploration the robot is back at START and drives its shortest known path to the GOAL.
 
 The robot explores the maze on its own: FSM (step 9) + DFS (step 11) over
 MazeMemory (step 10), every junction placed with the ODOMETRY pose estimate
@@ -36,6 +37,7 @@ from mazes.maze_spec import MAZES
 from mazes.topology import evaluate_memory, expected_left_hand_events
 from mapping.graph_map import draw_graph, save_graph
 from navigation.maze_decision import DfsExplorer
+from navigation.mission import MissionProvider, optimal_goal_route
 from navigation.maze_memory import MazeMemory
 from navigation import navigation_config as cfg
 from navigation.junction_types import ReferenceKind
@@ -63,6 +65,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--budget", type=int, default=200)
     ap.add_argument("--maze", default="T1")
+    ap.add_argument("--no-goal", action="store_true", help="explore only (no goal run after the exploration)")
     args = ap.parse_args()
     spec = MAZES[args.maze]
     walls = WallMap(spec)
@@ -81,7 +84,14 @@ def main() -> None:
     odo = stack.odo
     dfs = DfsExplorer(memory, lambda: (odo.pose.x_m, odo.pose.y_m, odo.pose.theta_rad),
                       start_pose=spec.start_pose, max_events=args.budget)
-    fsm = NavigationFSM(dfs)
+    mission = None
+    if not args.no_goal:
+        mission = MissionProvider(memory, lambda: (odo.pose.x_m, odo.pose.y_m, odo.pose.theta_rad),
+                                  start_pose=spec.start_pose, goal_xy=spec.nodes_m[spec.goal], max_events=args.budget)
+        dfs = mission.dfs
+    provider = mission or dfs
+    fsm = NavigationFSM(provider)
+    goal_t0, goal_gt_len, prev_gt = None, 0.0, None
     ticks, events = [], []
     min_clear, wall0 = math.inf, time.perf_counter()
     link = LockstepSession()
@@ -115,6 +125,12 @@ def main() -> None:
             link.send(s.state_sequence, cl, cr)
 
             x, y, th = s.gt_axle_x_m, s.gt_axle_y_m, s.gt_heading_rad
+            if mission is not None and mission.phase == "to_goal":
+                if goal_t0 is None:
+                    goal_t0 = t
+                if prev_gt is not None:
+                    goal_gt_len += math.hypot(x - prev_gt[0], y - prev_gt[1])
+                prev_gt = (x, y)
             c, sn = math.cos(th), math.sin(th)
             for bx, by in BODY_POINTS:
                 px, py = x + c * bx - sn * by, y + sn * bx + c * by
@@ -126,6 +142,7 @@ def main() -> None:
             ticks.append({
                 "t": t, "state": st.state.value, "phase": st.phase.value if st.phase else "",
                 "v_ref": st.v_ref_m_s, "w_ref": st.omega_ref_rad_s, "u_ff": ff,
+                "phase": mission.phase if mission else "explore",
                 "g_mode": g.mode if g else "", "g_y_hat": g.y_hat_m if g else None,
                 "g_alpha_hat": g.alpha_hat_rad if g else None,
                 "odo_s": stack.odo.signed_distance_m, "odo_th": stack.odo.heading_unwrapped,
@@ -140,24 +157,27 @@ def main() -> None:
                 k = len(events)
                 got = (node, o.left_available, o.straight_available, o.right_available, st.decision.value)
                 exp = tuple(expected[k]) if k < len(expected) else ("__START__", False, False, False, "FINISH")
-                arr = dfs.steps[-1].arrival
+                step_ = provider.steps[-1]
+                arr = step_.arrival
+                ph = getattr(step_, "phase", "explore")
+                ok_ev = (got == exp) if ph == "explore" else (k >= len(expected) or got[:4] == exp[:4])
                 events.append({"k": k, "t": t, "node": node, "kind": o.kind.value,
                                "left": o.left_available, "straight": o.straight_available,
                                "right": o.right_available, "decision": st.decision.value,
-                               "front_at_ref": o.front_distance_m, "match": got == exp,
+                               "front_at_ref": o.front_distance_m, "match": ok_ev,
                                "junction": arr.junction, "association": arr.association,
                                "match_distance": arr.match_distance_m, "inconsistent": arr.inconsistent,
-                               "dfs_reason": dfs.steps[-1].reason,
+                               "dfs_reason": step_.reason, "phase": getattr(step_, "phase", "explore"),
                                "odo_x": odo.pose.x_m, "odo_y": odo.pose.y_m, "odo_th": odo.pose.theta_rad,
                                "expected": exp, "closed_trigger": None, "closed_expected": None})
                 md = "" if arr.match_distance_m is None else f" d={arr.match_distance_m:.3f}"
                 print(f"  event {k:2d} t={t:6.1f}s {node:>9} -> J{arr.junction:<2} {arr.association:5}{md:8} "
-                      f"{dfs.steps[-1].reason:20} {st.decision.value:8} "
-                      f"{'ok' if got == exp else ('MISMATCH ' + str(exp) if expected else '')}")
+                      f"{step_.reason:20} {st.decision.value:8} "
+                      f"{'ok' if ok_ev else ('MISMATCH ' + str(exp) if expected else '')}")
             if st.closed_front_trigger_m is not None and events:
                 events[-1]["closed_trigger"] = st.closed_front_trigger_m
                 events[-1]["closed_expected"] = st.closed_front_expected_m
-            if st.state in (NavState.FINISHED, NavState.SAFETY_ABORT) or t > 1500.0:
+            if st.state in (NavState.FINISHED, NavState.SAFETY_ABORT) or t > 6000.0:
                 break
     finally:
         link.release()
@@ -216,9 +236,24 @@ def main() -> None:
     print(f"min body clearance (GT): {1000 * min_clear:.1f} mm")
     print(f"collision        : {coll}")
     print(f"simulated / wall time: {ticks[-1]['t']:.0f} s / {time.perf_counter() - wall0:.0f} s")
-    nav_ok = (fsm.state is NavState.FINISHED and dfs.finished_reason == "complete"
-              and dfs.steps[-1].arrival.junction == 0 and not coll and (not expected or n_ok == len(events)))
-    print(f"navigation       : {'PASS' if nav_ok else 'CHECK'}  (explored, back at START, no collision)")
+    explored = dfs.finished_reason == "complete" and (not expected or n_ok == len(events))
+    nav_ok = fsm.state is NavState.FINISHED and explored and not coll
+    if mission is None:
+        nav_ok = nav_ok and dfs.steps[-1].arrival.junction == 0
+    else:
+        last = ticks[-1]
+        gnode = nearest_node(spec, last["gt_x"], last["gt_y"], last["gt_th"], cfg.D_SIDE_CANONICAL_M)
+        gnode2 = nearest_node(spec, last["gt_x"], last["gt_y"], last["gt_th"], cfg.D_DEAD_END_CANONICAL_M)
+        at_goal = spec.goal in (gnode, gnode2)
+        opt_path, opt_len = optimal_goal_route(spec)
+        print(f"goal run         : reason {mission.finished_reason}, robot at true node {gnode} "
+              f"(goal {spec.goal}: {'REACHED' if at_goal else 'NOT reached'}), "
+              f"{(ticks[-1]['t'] - goal_t0) if goal_t0 else 0:.0f} s, path {goal_gt_len:.2f} m "
+              f"(optimal {opt_len:.2f} m, {len(opt_path)} nodes), goal junction J{mission.goal_junction} "
+              f"{mission.goal_distance_m if mission.goal_distance_m is not None else float('nan'):.3f} m from the goal position")
+        nav_ok = nav_ok and mission.finished_reason == "goal_reached" and at_goal
+    print(f"navigation       : {'PASS' if nav_ok else 'CHECK'}  (explored, back at START, "
+          f"{'goal reached, ' if mission else ''}no collision)")
     print(f"topological map  : {'CORRECT' if ev_report['correct'] else 'INCORRECT'}  "
           f"(a measured result of the configuration, not a pass criterion: in T3 configuration A is "
           f"expected to miss the ring closure)")

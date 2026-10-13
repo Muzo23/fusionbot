@@ -15,6 +15,12 @@ Trémaux / DFS rules, evaluated at every junction event from the FSM:
   4. FINISH: back at START (memory junction 0, reached as the dead end behind
      the start pose) with nothing left to explore. The robot stops there.
 
+Consistency guard: if the chosen manoeuvre is not physically available in
+the current observation (the memory no longer matches the world, e.g. the
+heading estimate drifted past 45 deg so global directions are snapped wrongly),
+the explorer stops with FINISH, reason "inconsistent" - a graceful, measurable
+failure of the pose estimate instead of a safety abort.
+
 A budget (max_events) stops the exploration with FINISH if it does not
 terminate (e.g. a missed loop closure in configuration A makes the robot
 re-explore a loop as if it were new); the reason is recorded.
@@ -73,7 +79,7 @@ class DfsExplorer:
         if self.max_events is not None and len(self.steps) >= self.max_events:
             return self._finish(arr, "budget")
         if arr.association == "MATCH" and arr.loop_closure:
-            return self._go(arr, arr.arrival_exit, "loop_closure_return")
+            return self.decide_checked(obs, arr, arr.arrival_exit, "loop_closure_return")
         for _, q in PREFERENCE:
             d = rotate(arr.heading, q)
             if d in arr.exits and d not in j.edge_at:
@@ -81,7 +87,13 @@ class DfsExplorer:
         parent = self.parent_exit.get(jid)
         if jid == 0 or parent is None:
             return self._finish(arr, "complete")
-        return self._go(arr, parent, "backtrack")
+        return self.decide_checked(obs, arr, parent, "backtrack")
+
+    def decide_checked(self, obs, arr, d, reason):
+        dec = relative_decision(arr.heading, d)
+        if not obs.available(dec):
+            return self._finish(arr, "inconsistent")
+        return self._go(arr, d, reason)
 
     def _go(self, arr: Arrival, d: Dir, reason: str) -> ManeuverDecision:
         dec = relative_decision(arr.heading, d)
